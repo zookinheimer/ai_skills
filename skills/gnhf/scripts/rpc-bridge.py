@@ -25,7 +25,18 @@ import threading
 import time
 from datetime import datetime, timezone
 
-MARKER_RE = re.compile(r"MANUAL_RUN:\s*(DONE|BAILED|ASK)\s*—\s*(.*)", re.DOTALL)
+# The detail group stops at the next MANUAL_RUN marker (or end of string),
+# not just at end of string -- a plain greedy `(.*)` with DOTALL and no
+# lookahead swallows every subsequent marker into the first one's detail,
+# so a genuine premature-then-corrected DONE (see rpc-bridge-smoke-test.sh
+# scenario 3) would report the premature marker's text instead of the real
+# final one. Still DOTALL/non-greedy internally so a legitimately
+# multi-line detail (e.g. an ASK's "what I already tried" paragraph) is
+# still captured whole when it's the last/only marker in the text.
+MARKER_RE = re.compile(
+    r"MANUAL_RUN:\s*(DONE|BAILED|ASK)\s*—\s*(.*?)(?=\n*MANUAL_RUN:\s*(?:DONE|BAILED|ASK)\s*—|\Z)",
+    re.DOTALL,
+)
 
 # Control-file command types passed straight through to pi's stdin verbatim,
 # beyond the bridge's own synthesized "answer" -> steer/prompt translation.
@@ -34,6 +45,13 @@ PASSTHROUGH_TYPES = {
     "abort_retry", "clear_queue", "set_steering_mode", "set_follow_up_mode",
     "set_auto_retry", "set_auto_compaction", "bash",
 }
+
+# Minimum seconds between RUNNING heartbeat rewrites. The status file's
+# timestamp line is what a monitor compares against wall clock to tell
+# "still working" from "stalled" (see SKILL.md step 6) -- too frequent and
+# it's needless atomic-replace churn on every text_delta event, too sparse
+# and a monitor's stall check loses resolution.
+HEARTBEAT_INTERVAL_S = 10.0
 
 
 def utcnow() -> str:
@@ -65,8 +83,10 @@ class Bridge:
         self.turn_text = []
         self.control_offset = 0
         self.log_lock = threading.Lock()
+        self.status_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.terminal_state = None  # "DONE" | "BAILED" once reached
+        self.current_status_state = None  # mirrors the last state written to --status-file
         self.bridge_log_path = self._bridge_log_path()
 
     def _bridge_log_path(self) -> str:
@@ -85,6 +105,7 @@ class Bridge:
         if self.a.plan:
             cmd += ["--plan"]
         self.append_bridge_log(f"Spawning: {' '.join(cmd)} (cwd={self.a.cwd})")
+        self.echo(f"[bridge] launching: {' '.join(cmd)}")
         self.proc = subprocess.Popen(
             cmd, cwd=self.a.cwd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -97,6 +118,7 @@ class Bridge:
     def run(self):
         threading.Thread(target=self.control_loop, daemon=True).start()
         threading.Thread(target=self.stderr_pump, daemon=True).start()
+        threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         self.event_loop()
 
     # ---------- outbound (bridge -> pi stdin) ----------
@@ -130,12 +152,24 @@ class Bridge:
         elif etype == "agent_start":
             self.is_streaming = True
             self.turn_text = []
+            if not self.terminal_state and self.current_status_state != "RUNNING":
+                # Clears a stale ASK (or SETTLED_NO_MARKER-adjacent) label once
+                # the model resumes -- otherwise a monitor that already
+                # answered the question keeps seeing "ASK" with a frozen
+                # timestamp from before the answer, indistinguishable from a
+                # genuinely stalled/unanswered one.
+                self.write_status("RUNNING", "")
         elif etype == "message_end":
             msg = event.get("message") or {}
             if msg.get("role") == "assistant":
                 for block in msg.get("content") or []:
                     if block.get("type") == "text":
                         self.turn_text.append(block.get("text", ""))
+                        text = block.get("text", "").strip()
+                        if text:
+                            self.echo(text)
+        elif etype == "tool_execution_start":
+            self.echo(f"[tool] {self._describe_tool_call(event)}")
         elif etype == "agent_settled":
             self.is_streaming = False
             text = "".join(self.turn_text)
@@ -161,6 +195,7 @@ class Bridge:
             execute_opt = next((o for o in options if o.startswith("Execute the plan")), None)
             if execute_opt is not None:
                 self.append_bridge_log(f"auto-answering plan-mode select -> {execute_opt!r}")
+                self.echo(f"[bridge] auto-approving plan: {execute_opt}")
                 self.send_command({"type": "extension_ui_response", "id": req_id, "value": execute_opt})
                 return
             self.append_bridge_log(f"WARN unrecognized select dialog, cancelling: {json.dumps(event)}")
@@ -179,6 +214,25 @@ class Bridge:
             if kind in found:
                 return kind, found[kind]
         return "SETTLED_NO_MARKER", ""
+
+    def heartbeat_loop(self):
+        # A genuine wall-clock timer, NOT triggered by incoming pi events --
+        # `pi` emits nothing at all on stdout while a tool call is silently
+        # running (confirmed: a plain `sleep 12` produces zero events for
+        # the full 12s), so an event-triggered heartbeat never fires during
+        # exactly the gap it exists to cover. This periodic write is
+        # therefore only a liveness signal ("the bridge's own loop is still
+        # alive and pi hasn't exited"), not a "pi made real progress"
+        # signal -- a long, legitimately silent tool call looks identical
+        # to a stuck one from here. That distinction still needs the
+        # SKILL.md step 6 approach (scan tool-call content, watch for a
+        # repeated identical failure), this just replaces "the timestamp is
+        # frozen at launch time forever" with something that actually moves.
+        while not self.stop_event.wait(HEARTBEAT_INTERVAL_S):
+            if self.terminal_state:
+                return
+            if self.current_status_state == "RUNNING":
+                self.write_status("RUNNING", "")
 
     # ---------- control file (monitor -> bridge) ----------
     def control_loop(self):
@@ -224,10 +278,52 @@ class Bridge:
 
     # ---------- status file (bridge -> monitor), atomic ----------
     def write_status(self, state: str, detail: str):
-        tmp = f"{self.a.status_file}.tmp.{os.getpid()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(f"{state}\n{utcnow()}\n{detail}\n")
-        os.replace(tmp, self.a.status_file)
+        # Called from the main event-loop thread (agent_start/agent_settled/
+        # finish) and now also from heartbeat_loop's own thread -- the tmp
+        # filename is only unique per-process (os.getpid()), not per-thread,
+        # so two concurrent callers would race on the same tmp path without
+        # this lock.
+        changed = state != self.current_status_state
+        with self.status_lock:
+            tmp = f"{self.a.status_file}.tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(f"{state}\n{utcnow()}\n{detail}\n")
+            os.replace(tmp, self.a.status_file)
+            self.current_status_state = state
+        if changed:
+            # Only on a real transition -- not the heartbeat's own periodic
+            # re-write of the same RUNNING state, which would otherwise spam
+            # an identical line every ~10s.
+            self.echo(f"[bridge] status -> {state}" + (f" ({detail})" if detail else ""))
+
+    # ---------- human-readable live echo (bridge's own real stdout) ----------
+    def echo(self, line: str):
+        # A bare-background launch redirects this to the task's own log
+        # file (`> logs/<TASK-ID>.log`), giving a readable companion next
+        # to the raw JSONL --events-log. A Herdr-pane launch that does NOT
+        # redirect this away shows it live in the pane -- this is the
+        # whole point: rpc-bridge.py previously produced zero real stdout
+        # output (everything went to files), which is both invisible to a
+        # human watching the pane and, empirically, unreliable for Herdr's
+        # own pane-output-based agent detection.
+        for text_line in line.splitlines() or [""]:
+            print(text_line, flush=True)
+
+    @staticmethod
+    def _describe_tool_call(event: dict) -> str:
+        name = event.get("toolName", "?")
+        args = event.get("args") or {}
+        if name == "bash":
+            return f"bash: {args.get('command', '')}"
+        if name in ("edit", "write"):
+            return f"{name}: {args.get('path', '')}"
+        if name == "read":
+            path = args.get("path", "")
+            offset, limit = args.get("offset"), args.get("limit")
+            span = f" [{offset}:{offset + limit}]" if offset is not None and limit is not None else ""
+            return f"read: {path}{span}"
+        # Fallback: name + a short, single-line rendering of whatever args exist.
+        return f"{name}: {json.dumps(args)[:200]}"
 
     # ---------- shutdown ----------
     def shutdown_pi(self):

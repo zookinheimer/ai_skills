@@ -226,13 +226,23 @@ escalating. See step 8 for the complete, narrow list of real stops
 
 Create a dedicated git worktree for this run rather than working in the
 main checkout or an existing feature branch. Follow the repo's own
-established convention if it has one (e.g. a sibling `manual-wt/<TASK-ID>`
-directory pattern next to an automated driver's own worktrees); otherwise
-a plain sibling directory named after the task/branch is fine:
+established convention if it has one; otherwise a plain sibling directory
+named after the task/branch is fine:
 
 ```bash
 git worktree add /path/to/worktrees/<TASK-ID> -b <TASK-ID>
 ```
+
+**In this repo specifically**: use `~/git/manual-wt/<TASK-ID>` (and
+`~/git/manual-wt/logs/` for the prompt/events/status/control files) — NOT
+`~/git/worktrees/`, which belongs to the separate `burnkit`/`dsh`
+automated driver (`scripts/burn/driver.py`; see
+`docs/development.md#autonomous-dsh-headless-sessions`). The two drivers
+don't share worktree state or a lock protocol with each other, so keeping
+them in visibly separate sibling directories is what actually prevents a
+collision, not a naming convention alone. Confirmed as the real path in
+practice, not just a placeholder: AD-003.08.04 (2026-09-10) ran from
+`~/git/manual-wt/AD-003.08.04`.
 
 If the model backing this run is local/self-hosted (nothing leaves the
 box), and the task needs gitignored source material the repo normally
@@ -369,39 +379,72 @@ The wall-clock bound (TTL) is the primary and simplest bound — wrap the
 launch in `timeout`.
 
 **If this session is itself running inside a Herdr-managed pane**
-(`test "${HERDR_ENV:-}" = 1`), launch the run in a new Herdr pane instead
-of a bare detached process, so it shows up in Herdr's own agent list/panel
-like any other agent session. Herdr's automatic agent detection recognizes
-the agent kind (`pi`, `opencode`, etc.) even when the pane's foreground
-command is wrapped in `timeout` — verified empirically: a
-`timeout N pi -p ... --session-id ...` command run via `herdr pane run`
-still shows up in `herdr agent list` with `"agent":"pi"` once it starts
-producing output, exactly as if it had been typed directly — so the TTL
-bound is unaffected by the wrapping. Do not use `herdr agent start` for
-this (its `--timeout` is only a 3-300s startup-readiness wait, not a
-run-length bound, and it won't take a `timeout`-wrapped command line).
-
-Give each run its own tab rather than stacking it as a split pane in the
-caller's tab (a split competes for screen space with whatever the caller
-is doing; a tab is a separate full screen, switched between, which is
-what a multi-hour unattended run warrants — one run, one tab, easy to
-find later):
+(`test "${HERDR_ENV:-}" = 1`), launch the run in its own Herdr workspace
+(a genuinely separate window, not a split or a tab in the caller's
+window — the user's preference, confirmed 2026-09-10) instead of a bare
+detached process, so it shows up in Herdr's own agent list/panel like any
+other agent session:
 
 ```bash
-split=$(herdr pane split --current --direction down --no-focus \
-    --cwd /path/to/worktrees/<TASK-ID>)
-tmp_pane_id=$(printf '%s\n' "$split" | jq -r '.result.pane.pane_id')
-moved=$(herdr pane move "$tmp_pane_id" --new-tab --label "<TASK-ID>" --no-focus)
-pane_id=$(printf '%s\n' "$moved" | jq -r '.result.move_result.pane.pane_id')
+ws=$(herdr workspace create --cwd /path/to/worktrees/<TASK-ID> \
+    --label "<TASK-ID>" --no-focus)
+pane_id=$(printf '%s\n' "$ws" | jq -r '.result.root_pane.pane_id')
+```
+
+Do not use `herdr agent start` for this (its `--timeout` is only a
+3-300s startup-readiness wait, not a run-length bound, and it won't take
+a `timeout`-wrapped command line).
+
+**If the resolved agent (step 1) is `pi`**, run it through `rpc-bridge.py`
+here too (same flags as the bare-background form below), so the ASK
+live-channel and `--plan` auto-execute both work inside Herdr as well —
+**crucially, do NOT redirect its stdout away** (no trailing `>
+.../logs/<TASK-ID>.log 2>&1`, unlike every other launch form on this
+page):
+
+```bash
+herdr pane run "$pane_id" \
+  "timeout <TTL_SECONDS> '${SKILL_DIR}/scripts/rpc-bridge.py' \
+      --session-id <task-id>-run \
+      --prompt-file /path/to/prompt.md \
+      --control-file /path/to/logs/<TASK-ID>.control.jsonl \
+      --events-log /path/to/logs/<TASK-ID>.log \
+      --status-file /path/to/logs/<TASK-ID>.status \
+      --cwd /path/to/worktrees/<TASK-ID> \
+      --extension '${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts' \
+      --plan"
+```
+
+Leaving stdout unredirected does two things at once, both confirmed live
+(2026-09-10, three trials): it makes the run's progress genuinely visible
+in the pane in real time (`rpc-bridge.py` echoes a human-readable line for
+each state transition, tool call, and completed assistant message — see
+"What the pane shows" below), **and** it fixes Herdr's own agent
+detection. Earlier testing with output redirected away (the events/status
+files still worked, but the pane itself stayed blank) found detection
+unreliable — one fluke `"agent":"pi"` sighting, then a longer trial that
+never registered at all sampled repeatedly across its whole duration.
+With output left visible, three separate trials all registered reliably
+(`"agent":"pi"`, `agent_status` moving `unknown` → `idle`/`working`) —
+Herdr's detector reads visible pane text, not the process tree, so a
+silent process (redirected or not producing real stdout at all) is
+invisible to it regardless of what it's actually doing internally.
+
+**What the pane shows**: `[bridge] launching: ...` at spawn, `[bridge]
+status -> <STATE>` on every real state transition (not the ~10s
+heartbeat's repeats of the same state), `[tool] bash: <command>` / `[tool]
+edit: <path>` / etc. for each tool call, and each completed assistant
+message's text. This is the same information the raw `--events-log` JSONL
+carries, reformatted for a human watching the window rather than a
+monitor scanning the file — use whichever fits the moment.
+
+**Every other resolved agent** keeps the existing plain form, output
+redirected as before:
+
+```bash
 herdr pane run "$pane_id" \
   "timeout <TTL_SECONDS> <agent> <agent-specific-flags> --session-id <task-id>-run -p '@/path/to/prompt.md' > /path/to/logs/<TASK-ID>.log 2>&1"
 ```
-
-(`pane split` then `pane move --new-tab` because pane creation itself only
-splits into the current tab — there's no direct "create pane in a new
-tab" primitive. `pane move` keeps the same `pane_id` when the move stays
-within the current workspace, per Herdr's own ID-stability rule, but read
-it back from `.result.move_result.pane.pane_id` rather than assuming.)
 
 Record `pane_id` — it's the handle for step 6's monitoring and stands in
 for the PID below.
@@ -426,7 +469,8 @@ nohup timeout <TTL_SECONDS> "${SKILL_DIR}/scripts/rpc-bridge.py" \
     --cwd /path/to/worktrees/<TASK-ID> \
     --extension "${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts" \
     --plan \
-    [--provider <provider> --model <model>] &
+    [--provider <provider> --model <model>] \
+    > /path/to/logs/<TASK-ID>.readable.log 2>&1 &
 
 # any other agent:
 cd /path/to/worktrees/<TASK-ID>
@@ -443,12 +487,12 @@ child (confirmed: `timeout` on this machine kills the whole process group,
 and the bridge's own shutdown path closes `pi`'s stdin, which `pi --mode
 rpc` treats as a clean-exit request before any signal is needed).
 
-**Known gap:** the Herdr `pane run` path above still launches `pi` bare
-(plain `-p`, no bridge) — it does not yet get the ASK live-channel or
-`--plan` auto-execute. Whether Herdr's pane agent-detection still
-recognizes `pi` when the pane's foreground process is a Python wrapper
-instead of `pi` itself is untested; routing pi through `rpc-bridge.py`
-inside a Herdr pane is deferred until that's checked.
+A pi run therefore leaves three logs, not one: `<TASK-ID>.log` (raw
+JSONL, `--events-log`, every RPC event verbatim), `<TASK-ID>.bridge.log`
+(the bridge's own diagnostics plus `pi`'s stderr), and
+`<TASK-ID>.readable.log` (the same human-readable echo the Herdr pane
+shows live above — `tail -f` this one for a quick "what's it doing"
+check without parsing JSONL).
 
 A turn/iteration bound (`max-turns`) only applies when the agent is
 literally invoked once per turn with session continuation (e.g. opencode's
@@ -500,16 +544,27 @@ head -n1 /path/to/logs/<TASK-ID>.status   # RUNNING | ASK | DONE | BAILED | PROC
   report it as the blocker, don't relaunch on a guess.
 - `KILLED`: the bridge received SIGTERM (TTL expiry, most likely) — same
   handling as a `timeout`-killed run in the non-pi flow.
-- `RUNNING` with no progress for a long stretch (compare the status file's
-  timestamp line against wall clock — no update in ~20 minutes while the
-  process is still alive) is the pi-run equivalent of the thrashing signal
-  below: worth a closer look at the events/bridge logs before deciding
-  whether to nudge (via the control file, a raw passthrough command like
-  `{"type":"steer","message":"..."}`) or let it keep running.
+- `RUNNING` with the status file's timestamp itself frozen (`rpc-bridge.py`
+  heartbeats it every ~10s while genuinely RUNNING, so no movement at all
+  for several minutes means the bridge process itself likely died or
+  hung) is a hard stop — check `ps -p <PID>` and the bridge log
+  immediately, this is a different and more serious signal than the next
+  bullet.
+- `RUNNING` with the timestamp still ticking but no real progress for a
+  long stretch (skim recent tool-call content in the events log, don't
+  just trust the timestamp) is the pi-run equivalent of the thrashing
+  signal below: worth a closer look before deciding whether to nudge (via
+  the control file, a raw passthrough command like
+  `{"type":"steer","message":"..."}`) or let it keep running. **The
+  heartbeat is a liveness signal, not a progress signal** — it ticks every
+  ~10s purely from wall-clock time as long as the bridge's own loop is
+  alive, so a single long-running tool call (a slow test suite, a big
+  build) looks identical in the timestamp to genuine thrashing. Telling
+  the two apart still means reading what the run is actually doing, the
+  same as the non-pi flow below.
 
-**For every other resolved agent**, or when running via a plain `pi -p`
-Herdr-pane launch (no live channel — see step 5's known gap), each check,
-whether from a `/loop` firing or a manual look, should be non-blocking:
+**For every other resolved agent**, each check, whether from a `/loop`
+firing or a manual look, should be non-blocking:
 
 ```bash
 tail -n 40 /path/to/logs/<TASK-ID>.log
@@ -531,9 +586,10 @@ approval/question prompt in the pane — a headless `-p` invocation should
 never hit one, so treat `blocked` as a possible stuck/thrashing signal
 worth a closer look via `agent read`, not a routine state.
 
-**Silent exit is its own case, distinct from thrashing** (non-pi agents,
-or a plain `pi -p` Herdr-pane launch — a pi run through `rpc-bridge.py`
-gets this as an explicit `PROCESS_EXITED` status above instead). If
+**Silent exit is its own case, distinct from thrashing** (non-pi agents
+only — any pi run, bare-background or through a Herdr pane, always goes
+through `rpc-bridge.py` now and gets this as an explicit `PROCESS_EXITED`
+status above instead). If
 `ps`/`herdr agent get` shows the process/pane is no longer running (not
 killed by
 `timeout` — `etime` well under the TTL) and the log has neither
@@ -655,13 +711,20 @@ Review it before first use to verify behavior.
 and bridges gnhf's file-based monitoring protocol to it, giving the run a
 live channel to receive an answer to a `MANUAL_RUN: ASK —` question
 (step 6) and auto-answering the plan-mode extension's "Execute the plan"
-dialog when launched with `--plan` (see step 5). stdlib-only Python, no
-dependencies. Review it before first use to verify behavior.
+dialog when launched with `--plan` (see step 5). Also echoes a
+human-readable line to its own real stdout for every state transition,
+tool call, and completed assistant message — this is what a Herdr pane
+shows live when its output isn't redirected away, and what lands in
+`<TASK-ID>.readable.log` for the bare-background form (step 5). stdlib-
+only Python, no dependencies. Review it before first use to verify
+behavior.
 
 `scripts/rpc-bridge-smoke-test.sh` — exercises `rpc-bridge.py` end to end
-against a real `pi --mode rpc` subprocess: the ASK/answer loop and the
-plan-mode auto-execute loop. Run it after any change to `rpc-bridge.py` or
-the vendored plan-mode extension, before trusting either on a real task.
+against a real `pi --mode rpc` subprocess: the ASK/answer loop, the
+plan-mode auto-execute loop, a premature-then-real-DONE marker sequence
+within one agent run, and the status-file heartbeat during a long-running
+tool call. Run it after any change to `rpc-bridge.py` or the vendored
+plan-mode extension, before trusting either on a real task.
 
 `scripts/pi-extensions/plan-mode/` — vendored copy of `pi-coding-agent`'s
 bundled plan-mode example extension (unmodified). Loaded via `pi

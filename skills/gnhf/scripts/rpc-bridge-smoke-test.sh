@@ -1,13 +1,30 @@
 #!/usr/bin/env bash
 # Exercise rpc-bridge.py end to end against a real `pi --mode rpc`
-# subprocess, in two scenarios:
+# subprocess, in four scenarios:
 #   1. ASK/answer loop: force a MANUAL_RUN: ASK --, answer it via the
 #      control file, confirm MANUAL_RUN: DONE -- is reached.
 #   2. Plan-mode auto-execute: launch with --plan and the vendored
 #      plan-mode extension, confirm the bridge auto-answers the
 #      "Execute the plan" dialog with no control-file write, and
 #      MANUAL_RUN: DONE -- is still reached.
-# Exit 0 = both loops worked, non-zero = one didn't (see diagnostics).
+#   3. Premature-then-real DONE within one agent run: the model prints a
+#      DONE-shaped line, then keeps generating more tool calls before
+#      truly finishing (this is exactly what happened live on
+#      AD-003.08.04 -- NOT a deterministic plan-mode re-trigger, on
+#      inspection: agent_end's own handler just returns if the todo list
+#      isn't complete, it doesn't re-prompt. What actually happened is
+#      pi's ordinary agent loop continuing because the model itself chose
+#      to keep working past its first "done" line -- so this scenario
+#      reproduces that shape directly with plain tool calls, no --plan).
+#      Confirms the bridge waits for agent_settled rather than latching
+#      onto the first DONE-shaped text mid-run, and that the LAST marker
+#      of each kind in the accumulated turn text wins (scan_markers's
+#      dict comprehension keeps the last match per kind, not the first).
+#   4. Heartbeat + stale-ASK clear: confirms the status file's timestamp
+#      actually advances during a longer RUNNING stretch (not just once at
+#      launch), and that answering an ASK clears the label back to RUNNING
+#      on the next agent_start rather than leaving a stale "ASK" behind.
+# Exit 0 = all four loops worked, non-zero = one didn't (see diagnostics).
 set -uo pipefail   # not -e: we poll in loops and inspect status ourselves
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -51,9 +68,13 @@ trap cleanup EXIT
 fail() {
   local label="$1" status="$2"
   echo "FAIL($label): $status" >&2
-  echo "--- status file ---" >&2; cat "$WORKDIR/$label.status" 2>/dev/null >&2
-  echo "--- tail events log ---" >&2; tail -n 60 "$WORKDIR/$label.log" 2>/dev/null >&2
-  echo "--- tail bridge log ---" >&2; tail -n 60 "$WORKDIR/$label.bridge.log" 2>/dev/null >&2
+  # >&2 2>/dev/null, in that order: redirect stdout to (the real) stderr
+  # first, THEN silence each command's own stderr -- the reverse order
+  # remaps fd2 to /dev/null before >&2 copies it, which silently discards
+  # the very output these diagnostics exist to show.
+  echo "--- status file ---" >&2; cat "$WORKDIR/$label.status" >&2 2>/dev/null
+  echo "--- tail events log ---" >&2; tail -n 60 "$WORKDIR/$label.log" >&2 2>/dev/null
+  echo "--- tail bridge log ---" >&2; tail -n 60 "$WORKDIR/$label.bridge.log" >&2 2>/dev/null
   exit 1
 }
 
@@ -141,6 +162,98 @@ EOF
   echo "PASS(2): plan-mode select dialog auto-answered, MANUAL_RUN: DONE — reached with no control-file write"
 }
 
+### Scenario 3: premature DONE-shaped line, more tool calls follow, real DONE wins
+run_scenario_3() {
+  local label="redo"
+  cat > "$WORKDIR/$label.prompt.md" <<'EOF'
+You are in a test harness, not a real task. Follow these steps in order,
+in ONE continuous response (do not stop or end your turn early):
+
+1. Run the bash command `echo step1` using your bash tool.
+2. Immediately after that tool result, print a line starting exactly
+   "MANUAL_RUN: DONE — premature, ignore this one" -- but do NOT stop
+   here, this is a deliberate false alarm you must then correct.
+3. Run the bash command `echo step2` using your bash tool.
+4. After that tool result, print a line starting exactly
+   "MANUAL_RUN: DONE — printed final" and THEN genuinely stop (no further
+   tool calls, no further text).
+EOF
+
+  timeout "$TIMEOUT" "$BRIDGE" \
+      --session-id "rpc-bridge-smoke-$label" \
+      --prompt-file "$WORKDIR/$label.prompt.md" \
+      --control-file "$WORKDIR/$label.control.jsonl" \
+      --events-log "$WORKDIR/$label.log" \
+      --status-file "$WORKDIR/$label.status" \
+      --cwd "$WORKDIR" \
+      >"$WORKDIR/$label.bridge-stdout.log" 2>&1 &
+  BRIDGE_PID=$!
+
+  wait_for_status "$label" DONE 90 || fail "$label" "never reached DONE within 90s"
+  wait "$BRIDGE_PID" 2>/dev/null; BRIDGE_PID=0
+
+  grep -q 'echo step1' "$WORKDIR/$label.log" || fail "$label" "step 1's tool call never ran"
+  grep -q 'echo step2' "$WORKDIR/$label.log" || \
+    fail "$label" "model never continued to step 2 after the premature DONE line -- can't exercise the supersede-with-the-real-marker path this way"
+  grep -q 'printed final' "$WORKDIR/$label.status" || \
+    fail "$label" "status file's DONE detail is not the real final marker (expected 'printed final') -- the bridge may have latched onto the premature one"
+  if grep -q 'premature, ignore this one' "$WORKDIR/$label.status"; then
+    fail "$label" "status file's DONE detail is the PREMATURE marker, not the final one -- bridge terminated too early"
+  fi
+  echo "PASS(3): premature DONE-shaped line was superseded by the real final DONE within the same agent run, and the bridge waited for agent_settled rather than latching on early"
+}
+
+### Scenario 4: status-file timestamp heartbeats during a long RUNNING stretch
+run_scenario_4() {
+  local label="heartbeat"
+  cat > "$WORKDIR/$label.prompt.md" <<'EOF'
+You are in a test harness, not a real task. Run the bash command
+`sleep 12` using your bash tool and wait for it to complete (do not skip
+this step or use a shorter sleep). After it finishes, print a line
+starting exactly "MANUAL_RUN: DONE — slept" and stop. Do not use any
+other tools.
+EOF
+
+  timeout "$TIMEOUT" "$BRIDGE" \
+      --session-id "rpc-bridge-smoke-$label" \
+      --prompt-file "$WORKDIR/$label.prompt.md" \
+      --control-file "$WORKDIR/$label.control.jsonl" \
+      --events-log "$WORKDIR/$label.log" \
+      --status-file "$WORKDIR/$label.status" \
+      --cwd "$WORKDIR" \
+      >"$WORKDIR/$label.bridge-stdout.log" 2>&1 &
+  BRIDGE_PID=$!
+
+  # Wait for the status file to exist at all, then sample its timestamp,
+  # wait past one heartbeat interval, sample again -- while still RUNNING
+  # this proves the heartbeat (not just the one-time launch write) is what
+  # moved it.
+  local waited=0
+  while [ ! -f "$WORKDIR/$label.status" ] && (( waited < 30 )); do
+    sleep 1; ((waited++))
+  done
+  [ -f "$WORKDIR/$label.status" ] || fail "$label" "status file never appeared"
+  local ts0
+  ts0="$(sed -n '2p' "$WORKDIR/$label.status")"
+
+  sleep 13   # > HEARTBEAT_INTERVAL_S (10s); the sleep-12 tool call should still be running
+
+  kill -0 "$BRIDGE_PID" 2>/dev/null || fail "$label" "bridge process died before the heartbeat window elapsed"
+  local ts1 state1
+  ts1="$(sed -n '2p' "$WORKDIR/$label.status")"
+  state1="$(head -n1 "$WORKDIR/$label.status")"
+  if [ "$ts1" = "$ts0" ]; then
+    fail "$label" "status file timestamp did not advance across a 13s window while still $state1 -- heartbeat is not firing"
+  fi
+  echo "PASS(4a): status-file timestamp advanced from a heartbeat during a long RUNNING stretch ($ts0 -> $ts1, still $state1)"
+
+  wait_for_status "$label" DONE 60 || fail "$label" "never reached DONE within 60s after the sleep completed"
+  wait "$BRIDGE_PID" 2>/dev/null; BRIDGE_PID=0
+  echo "PASS(4b): reached MANUAL_RUN: DONE — after the heartbeat-covered stretch"
+}
+
 run_scenario_1
 run_scenario_2
-echo "PASS: both rpc-bridge loops verified"
+run_scenario_3
+run_scenario_4
+echo "PASS: all four rpc-bridge loops verified"

@@ -466,7 +466,7 @@ herdr pane run "$pane_id" \
       --cwd /path/to/worktrees/<TASK-ID> \
       --extension '${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts' \
       --plan \
-      --mcp-config '${SKILL_DIR}/scripts/mcp-context7.json'"
+      --mcp-config '${SKILL_DIR}/scripts/mcp-defaults.json'"
 ```
 
 Leaving stdout unredirected does two things at once, both confirmed live
@@ -523,7 +523,7 @@ nohup timeout <TTL_SECONDS> "${SKILL_DIR}/scripts/rpc-bridge.py" \
     --cwd /path/to/worktrees/<TASK-ID> \
     --extension "${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts" \
     --plan \
-    --mcp-config "${SKILL_DIR}/scripts/mcp-context7.json" \
+    --mcp-config "${SKILL_DIR}/scripts/mcp-defaults.json" \
     [--provider <provider> --model <model>] \
     > /path/to/logs/<TASK-ID>.readable.log 2>&1 &
 
@@ -605,19 +605,53 @@ merge additively with `pi`'s own existing default MCP set** rather than
 replacing it (verified empirically: a run given only a context7-only
 config still had `serena` available too, from whatever `pi` already
 configures by default) — so passing one is low-risk. `${SKILL_DIR}
-/scripts/mcp-context7.json` wires in `context7` (up-to-date
-library/framework doc lookups) by default, added 2026-09-11 at the user's
-request. Deliberately **not** wiring in this repo's other configured MCP
-servers (`godot`, `retroarch`, `backlog`) into the *launched* agent by
-default: `godot`/`retroarch` serve phases of this project (presentation,
-original-game capture) that don't overlap with `game/simulation/`'s
-deliberately engine-independent work, and giving an unattended run a new
-MCP integration point is itself a new failure surface (see the line-wrap
-hang and marker-regex bug this same session ran into) — not worth taking
-on for tools with no clear task-relevant payoff. If a future task family
-genuinely needs one of those (e.g. presentation-layer work that would
-benefit from `godot`'s live debug output), point `--mcp-config` at a
-task-specific config file rather than broadening the default one.
+/scripts/mcp-defaults.json` wires in `context7` (up-to-date
+library/framework doc lookups) and `godot` (project introspection, scene
+editing, and — with the environment prerequisites below — actually
+running the project) by default, added 2026-09-11 at the user's request.
+
+**`godot`'s "run and watch" tools need real environment prerequisites,
+confirmed and set up 2026-09-11 (persist across reboots except the
+Xvfb process itself, which does not):**
+- `godot_get_project_info`/`godot_get_godot_version`/`godot_list_projects`/
+  `godot_get_uid`/`godot_update_project_uids` and the scene-editing tools
+  (`godot_create_scene`/`godot_add_node`/`godot_save_scene`/
+  `godot_load_sprite`/`godot_export_mesh_library`) all run Godot with
+  `--headless` internally and need nothing extra.
+- `godot_run_project`/`godot_get_debug_output`/`godot_stop_project`/
+  `godot_launch_editor` spawn Godot with a real display flag (`-d`/`-e`,
+  never `--headless`) — confirmed by reading
+  `node_modules/@coding-solo/godot-mcp/build/index.js` directly, not
+  assumed. They need: (1) a running virtual display — this machine has
+  none by default (`DISPLAY`/`WAYLAND_DISPLAY` both empty, no
+  `/tmp/.X11-unix`), so a persistent `Xvfb :99 -screen 0 1280x720x24 &`
+  must be running (`mcp-defaults.json`'s `godot` entry sets `"env":
+  {"DISPLAY": ":99"}` to match — if you ever change the Xvfb display
+  number, update both together); this is a bare background process, not
+  managed by gnhf or any service, so it needs restarting by hand after a
+  reboot or if it dies — `pgrep -fa 'Xvfb :99'` to check; and (2) several
+  shared libraries this machine didn't have installed by default, found
+  one crash-message at a time by invoking the pinned Godot binary
+  directly under the Xvfb display (`DISPLAY=:99
+  .tools/game/godot/Godot_v4.7.1-stable_linux.x86_64 -d --path ./game`)
+  and reading its stderr rather than trusting the MCP tool's own generic
+  "no active process" error, which doesn't surface the real cause:
+  `libfontconfig1`, `libxcursor1`, `libwayland-cursor0`, `libxinerama1`,
+  `libxi6` (required — X11 display init fails without them, cascading
+  into a Wayland fallback that also fails with no compositor available),
+  plus `libasound2t64`/`libpulse0` (cosmetic only — without them the
+  engine still runs correctly, just logs an audio-driver-fallback
+  warning). Verified end to end after both installs: `run_project` →
+  `get_debug_output` → `stop_project` against `./game` returns real
+  engine output (version string, renderer, no errors) with a clean stop.
+- Deliberately **not** wiring in this repo's other configured MCP servers
+  (`retroarch`, `backlog`) into the *launched* agent by default:
+  `retroarch` serves original-game capture work that doesn't overlap with
+  the simulation/content work this skill has mostly been used for, and
+  `backlog`'s own MCP surface is for task/project management, not
+  something a single bounded task run needs mid-flight. If a future task
+  family genuinely needs one of those, point `--mcp-config` at a
+  task-specific config file rather than broadening the default one.
 
 ## 6. Monitor with minimal oversight
 

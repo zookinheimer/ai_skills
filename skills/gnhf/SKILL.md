@@ -222,6 +222,49 @@ decision" — gets solved by research and a documented choice, not by
 escalating. See step 8 for the complete, narrow list of real stops
 (it is not this one).
 
+**Standing user preference (set 2026-09-11): "no small reuse candidate
+anywhere in what's left" is not a stop condition either — it is the exact
+same "research and decide" situation, one level up, and the same recursive
+split applies.** This is a real incident, not a hypothetical: a chain
+researched every remaining item in a task family, found each one needed a
+genuinely new subsystem (not just a magnitude to invent), and paused to
+ask the user whether to keep going rather than picking one and splitting
+it. The user's answer: keep going, always — "needs a new subsystem" was
+never one of the four real stops, and stopping to ask was itself the bug,
+not a reasonable caution. The corrected procedure, to use automatically
+from here on with no exception:
+
+1. **Re-check every remaining candidate for a reuse opportunity before
+   concluding none exists.** "Needs a collar system" turned out to mean
+   "needs one boolean field already built two slices ago" three separate
+   times in this epic's own history (AD-003.08.13/.14/.16), and a fourth
+   candidate assumed to need a whole spell system turned out to reuse an
+   existing command kind wholesale (AD-003.08.17) — once *after* a user
+   had to say so explicitly. Do this check yourself, unprompted, before
+   ever concluding "nothing small is left."
+2. **If that search genuinely comes up empty for every remaining item**,
+   pick the best candidate by the same tie-breaks already used everywhere
+   else (best evidence tier; smallest total blast radius; most existing
+   structure to build on) and treat "build the subsystem" as the mechanism
+   decision from "Research and decide" above, scaled up. Recursively split
+   *that* decision the same way an oversized task's own AC gets split:
+   name the smallest first sub-slice of the subsystem that is itself
+   well-specced and buildable (a minimal primitive, not the whole thing —
+   the same way a real spell system would eventually start from one
+   working spell, not all of them at once), write it up with the same
+   research rigor as any other subtask, and launch it. A subsystem this
+   large may take several further slices after the first; that is normal,
+   not a sign something went wrong.
+3. **Do not call `AskUserQuestion` (or any other check-in) over "should I
+   keep going, this is a big one."** That question is already answered:
+   yes. The only things that still warrant a stop are the four listed at
+   the end of step 8 — a task genuinely needing zero candidate information
+   at all (not even a value to invent — `change-formation`'s doc row
+   naming no candidate values whatsoever is the one real example so far)
+   is closer to "no eligible task" than to "found nothing small"; skip it
+   for the next candidate the same way a gating-tooling conflict gets
+   skipped, without asking.
+
 ## 3. Isolate in a worktree
 
 Create a dedicated git worktree for this run rather than working in the
@@ -480,8 +523,38 @@ nohup timeout <TTL_SECONDS> <agent> <agent-specific-flags> \
     > /path/to/logs/<TASK-ID>.log 2>&1 &
 ```
 
-Default `TTL_SECONDS` to 10800 (3h) unless the user gives a different
-budget. Record the PID (or `pane_id` for the Herdr path) — for pi this is
+**Standing user preference (set 2026-09-10): do not let a run get killed
+by wall-clock TTL alone while it is genuinely still making progress.** The
+user does not want `timeout` cutting off a task that is actively working,
+just because it happens to be a harder slice than usual. In practice this
+means: default `TTL_SECONDS` to a generous backstop (86400 = 24h) rather
+than a tight budget, unless the user gives a different one — the real
+governor is step 6's monitoring (the thrashing/stall checks already
+described there), not the wall clock. Treat the TTL as a last-resort safety
+net against a truly runaway or hung session, not as a normal-completion
+bound: a task that's still emitting genuine tool-call activity when the
+old 3h default would have fired is not a reason to let it die.
+
+If a run is approaching an old/shorter TTL that was already set and is
+still progressing, don't wait for the kill — extend it proactively. `timeout`
+cannot have its deadline changed once started, and killing just the outer
+`timeout` PID does not spare its children (confirmed twice now: it takes
+the whole process tree down with it, `rpc-bridge.py` and `pi` included, the
+same as killing `rpc-bridge.py`'s own PID directly). The safe fix is
+kill-and-resume, not kill-and-restart-from-scratch: terminate the current
+wrapper, then immediately relaunch `rpc-bridge.py` with the **same
+`--session-id`** and a longer `TTL_SECONDS` (a fresh `--control-file` path
+is fine; reuse the same `--events-log`/`--status-file` paths so the run's
+history stays one continuous log). `pi --mode rpc --session-id <id>` is
+persisted per-session-id, so relaunching with the same id resumes the
+identical conversation and plan state (confirmed: the resumed run's
+plan-mode todo widget came back exactly as it was pre-kill, "0/11" and all,
+with no "creating a new session" warning) — the interruption costs a few
+seconds of relaunch time, not the run's progress. Re-arm a fresh Monitor on
+the (unchanged) status file path afterward, since the old one exits the
+moment it sees the `KILLED` status from the forced termination.
+
+Record the PID (or `pane_id` for the Herdr path) — for pi this is
 `rpc-bridge.py`'s own PID, not `pi`'s; killing it also kills the `pi`
 child (confirmed: `timeout` on this machine kills the whole process group,
 and the bridge's own shutdown path closes `pi`'s stdin, which `pi --mode
@@ -649,11 +722,26 @@ DONE/BAILED/TTL-expired/killed-for-thrashing, what actually landed (from
 `git log`/`git diff`, not from the run's own self-report), and the PR/merge
 outcome.
 
-**A merge/push itself can get blocked by the environment's own permission
-classifier**, independent of anything above — this is a hard external
-stop, not a decision of yours to route around. Report it plainly and wait
-for the user's one-time approval; once granted, resume the chain (step 8)
-from exactly where it stopped rather than re-doing the review.
+**Standing user authorization (granted 2026-09-10):** the user has told
+Claude directly that it has permission to merge the PR as part of this
+skill's own step 7 — `gh pr merge --squash` here is pre-authorized, not
+something to pause and re-confirm per task. This does not relax anything
+else: still review the diff against the AC first, still only merge a PR
+that passed that review, and everything else in this skill's list of real
+stops (gating-tooling conflicts, no eligible task, a genuine bail/ASK)
+still applies unchanged.
+
+**A merge/push itself can still get blocked by the environment's own
+permission classifier**, independent of the authorization above — that
+classifier is a separate, harness-level gate that a skill's own text
+cannot pre-clear; the standing authorization means don't treat a fresh
+merge as needing a *new* conversational confirmation, but if the
+classifier itself refuses the action, that is still a hard external stop,
+not a decision of yours to route around. Report it plainly (a Bash
+permission rule in the user's settings, added via the `update-config`
+skill, is the actual fix — offer it rather than retrying the same denied
+call) and wait; once resolved, resume the chain (step 8) from exactly
+where it stopped rather than re-doing the review.
 
 ## 8. Chain to the next task (skip if `--single`)
 
@@ -690,16 +778,33 @@ over them:
   longer a reason to treat a family as exhausted — only genuinely running
   out of backlog, or hitting the gating-tooling wall on every remaining
   item even after real attempts to split around it, counts.
-- **An environment-level block**, most notably a merge/push refused by a
-  permission classifier (step 7) — that specific approval is outside
-  gnhf's control. Report it, wait for the one-time approval, then resume
-  the chain from where it stopped.
+- **An environment-level block**, most notably a merge/push refused by the
+  harness's own permission classifier (step 7) — note that the user has
+  already granted standing authorization for Claude to run `gh pr merge`
+  as part of this skill, so a classifier refusal here is the separate
+  harness-level gate itself firing, not a missing conversational approval;
+  it is still outside gnhf's control. Report it (pointing at the
+  `update-config` skill / a settings.json Bash permission rule as the
+  actual fix) and wait, then resume the chain from where it stopped once
+  resolved.
 - **The user interrupts or stops the chain directly.**
 
 Every other fork in this skill (which task's next, whether to split a
 vague task, which candidate tick amount or stacking policy a launched
 run should pick, etc.) has a stated recommended default specifically so
 the chain doesn't stall on it — use that default and keep going.
+
+**Named anti-pattern (the actual failure this section exists to prevent):**
+"I researched everything left in this family and each one needs a real
+subsystem, so let me check with the user before committing to that much
+scope" is not caution, it is the chain stopping itself over something
+already covered by "Research and decide" (step 2) — see the standing
+preference recorded there for the full corrected procedure and the
+incident it came from. A task's size, or the fact that the *next* slice
+requires inventing a mechanism rather than a value, is never by itself a
+reason to pause the chain. If a genuine stop is warranted, it will always
+be one of the four bullets above — check the list, don't reason from how
+big or unfamiliar the work feels.
 
 ## Bundled scripts
 

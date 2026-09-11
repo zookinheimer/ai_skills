@@ -33,9 +33,23 @@ from datetime import datetime, timezone
 # final one. Still DOTALL/non-greedy internally so a legitimately
 # multi-line detail (e.g. an ASK's "what I already tried" paragraph) is
 # still captured whole when it's the last/only marker in the text.
+#
+# Anchored to the start of a line (`^` + MULTILINE): every prompt template
+# tells the model to "print A LINE starting `MANUAL_RUN: ...`", so a
+# genuine marker is never preceded by other content on its own line.
+# Observed live on AD-003.08.11 (--plan mode, session id
+# ad-003-08-11-run): the model's own plan text quoted the FINISH PROTOCOL
+# paragraph back verbatim (e.g. "...then print a line starting
+# `MANUAL_RUN: DONE —` summarizing..."), and the prior unanchored regex
+# matched that mid-sentence, backtick-quoted mention as a real terminal
+# marker -- a false DONE before any work had happened. Anchoring rejects
+# any occurrence with other text before it on the same line (quoted,
+# inline, or otherwise restated) while still matching every marker in the
+# four smoke-test scenarios, none of which ever put content before the
+# marker on its line.
 MARKER_RE = re.compile(
-    r"MANUAL_RUN:\s*(DONE|BAILED|ASK)\s*—\s*(.*?)(?=\n*MANUAL_RUN:\s*(?:DONE|BAILED|ASK)\s*—|\Z)",
-    re.DOTALL,
+    r"^MANUAL_RUN:\s*(DONE|BAILED|ASK)\s*—\s*(.*?)(?=\n*^MANUAL_RUN:\s*(?:DONE|BAILED|ASK)\s*—|\Z)",
+    re.DOTALL | re.MULTILINE,
 )
 
 # Control-file command types passed straight through to pi's stdin verbatim,

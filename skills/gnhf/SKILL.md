@@ -722,6 +722,24 @@ DONE/BAILED/TTL-expired/killed-for-thrashing, what actually landed (from
 `git log`/`git diff`, not from the run's own self-report), and the PR/merge
 outcome.
 
+**Explicitly stop that task's Monitor once you're done with it here —
+don't rely solely on the polling loop's own `break` to exit it.** A real
+incident (2026-09-11): two Monitor loops (each a plain `while true; do
+head -n1 "$f"; case ...; sleep 15; done` polling a status file for
+`DONE`/`BAILED`/etc, per step 6) kept running for hours after their tasks
+had already finished, been reviewed, and merged — one status file was
+observed to read `DONE` (correctly triggering review and merge) and then,
+later, `RUNNING` again with no agent process left alive to have written
+that, so the loop's `case` never got a second chance to match and `break`.
+The exact mechanism wasn't fully pinned down, but the fix does not depend
+on knowing it: once you've finished acting on a task in this step (merged,
+or escalated a bail/failure) you already have that task's Monitor id in
+hand from when you armed it in step 6 — call `TaskStop` on it right here,
+unconditionally, rather than assuming the loop already exited or will
+exit on its own. This costs nothing when the loop did already exit
+cleanly (`TaskStop` on an already-finished task is a harmless no-op) and
+prevents exactly this accumulation when it didn't.
+
 **Standing user authorization (granted 2026-09-10):** the user has told
 Claude directly that it has permission to merge the PR as part of this
 skill's own step 7 — `gh pr merge --squash` here is pre-authorized, not

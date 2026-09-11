@@ -91,7 +91,32 @@ state2, detail2 = mod.Bridge.scan_markers(ask_text)
 assert state2 == "ASK", f"expected state ASK, got {state2!r}"
 assert detail2 == "question line one\nstill part of the question\nand more", f"unexpected multi-line detail: {detail2!r}"
 
-print("PASS(0): MARKER_RE/scan_markers unit check (last-marker-wins, multi-line detail preserved)")
+# Regression check for the AD-003.08.11 false-positive: a --plan run whose
+# own plan text quotes the FINISH PROTOCOL paragraph back verbatim,
+# putting "MANUAL_RUN: DONE —" mid-sentence (backtick-quoted, other text
+# before it on the same line) rather than as its own line. This must NOT
+# be read as a real terminal marker.
+quoted_text = (
+    "Plan:\n"
+    "1. Implement the feature.\n"
+    "2. Run the test suite.\n"
+    "3. Per the instructions, then print a line starting "
+    "`MANUAL_RUN: DONE —` summarizing what landed.\n"
+)
+state3, detail3 = mod.Bridge.scan_markers(quoted_text)
+assert state3 == "SETTLED_NO_MARKER", (
+    f"expected a quoted/restated marker (not at line start) to be ignored, "
+    f"got state {state3!r} detail {detail3!r}"
+)
+
+# The genuine case this must keep matching: the marker as its own line,
+# with no other content before it -- unaffected by the anchor above.
+real_text = "Some work.\n\nMANUAL_RUN: DONE — implemented X, Y, Z; tests pass."
+state4, detail4 = mod.Bridge.scan_markers(real_text)
+assert state4 == "DONE", f"expected state DONE, got {state4!r}"
+assert detail4 == "implemented X, Y, Z; tests pass.", f"unexpected detail: {detail4!r}"
+
+print("PASS(0): MARKER_RE/scan_markers unit check (last-marker-wins, multi-line detail preserved, quoted/restated marker rejected, genuine line-start marker still matches)")
 EOF
 }
 

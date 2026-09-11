@@ -85,6 +85,7 @@ def parse_args():
     p.add_argument("--pi-bin", default="pi")
     p.add_argument("--extension", action="append", default=[], help="path to load via pi's --extension (repeatable)")
     p.add_argument("--plan", action="store_true", help="start pi in plan mode (passes --plan through)")
+    p.add_argument("--mcp-config", help="path to an MCP config file, passed through to pi's own --mcp-config (merges additively with pi's existing default MCP set -- confirmed empirically, not a replacement)")
     p.add_argument("--poll-interval", type=float, default=1.0)
     return p.parse_args()
 
@@ -118,6 +119,8 @@ class Bridge:
             cmd += ["--extension", ext]
         if self.a.plan:
             cmd += ["--plan"]
+        if self.a.mcp_config:
+            cmd += ["--mcp-config", self.a.mcp_config]
         self.append_bridge_log(f"Spawning: {' '.join(cmd)} (cwd={self.a.cwd})")
         self.echo(f"[bridge] launching: {' '.join(cmd)}")
         self.proc = subprocess.Popen(

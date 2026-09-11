@@ -190,7 +190,17 @@ of real stops.
 
 Find the task through whatever this repo actually uses (Backlog.md MCP
 task, `TODO.md` entry, a GitHub issue) — don't assume one system across
-repos.
+repos. **If the repo's own instructions (e.g. `AGENTS.md`) say task
+markdown should only be edited through a Backlog MCP/CLI tool, check that
+the tool actually resolves (`which backlog`, or watch for an `ENOENT` MCP
+connection failure) before falling back to direct `Read`/`Write`/`Edit` on
+the task files** — a silent, permanent fallback is exactly how this repo's
+own gap went unnoticed for an entire epic (found and closed 2026-09-11:
+`.mcp.json`/`.codex/config.toml` both expected a bare `backlog` binary on
+`PATH` that was never installed; `npm install -g backlog.md` closed it).
+Direct markdown edit is still the correct fallback when the tool genuinely
+isn't available — just don't let its absence go unremarked when a stated
+project convention exists to use something else instead.
 
 **Picking the next task automatically while chaining (step 8).** Don't
 stop to ask the user which task comes next. Walk the backlog in its own
@@ -455,7 +465,8 @@ herdr pane run "$pane_id" \
       --status-file /path/to/logs/<TASK-ID>.status \
       --cwd /path/to/worktrees/<TASK-ID> \
       --extension '${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts' \
-      --plan"
+      --plan \
+      --mcp-config '${SKILL_DIR}/scripts/mcp-context7.json'"
 ```
 
 Leaving stdout unredirected does two things at once, both confirmed live
@@ -512,6 +523,7 @@ nohup timeout <TTL_SECONDS> "${SKILL_DIR}/scripts/rpc-bridge.py" \
     --cwd /path/to/worktrees/<TASK-ID> \
     --extension "${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts" \
     --plan \
+    --mcp-config "${SKILL_DIR}/scripts/mcp-context7.json" \
     [--provider <provider> --model <model>] \
     > /path/to/logs/<TASK-ID>.readable.log 2>&1 &
 
@@ -575,6 +587,37 @@ multi-step tool-call loop inside a single invocation, so `timeout` alone
 already bounds that. Only build an external per-turn loop-and-check
 wrapper if the user explicitly wants turn-level granularity (e.g. to
 inspect/steer between turns) rather than a single long-lived process.
+
+**`AGENTS.md`/`CLAUDE.md` are already auto-loaded — don't duplicate them
+in the prompt.** Confirmed empirically (2026-09-11): `pi` discovers and
+injects the target repo's `AGENTS.md`/`CLAUDE.md` into every session's
+startup context by default (the CLI's own `--no-context-files` flag —
+"Disable AGENTS.md and CLAUDE.md discovery and loading" — names the
+behavior this is turning off). None of the launch forms above pass that
+flag, so a launched run already has the repo's own architecture/style
+guardrails without step 4's prompt needing to restate them. Don't add an
+explicit "go read AGENTS.md first" instruction to the prompt template —
+it would be redundant, and worse, would read as a hint that this doesn't
+already happen.
+
+**`--mcp-config` for `pi`: confirmed to work with `--mode rpc`, and to
+merge additively with `pi`'s own existing default MCP set** rather than
+replacing it (verified empirically: a run given only a context7-only
+config still had `serena` available too, from whatever `pi` already
+configures by default) — so passing one is low-risk. `${SKILL_DIR}
+/scripts/mcp-context7.json` wires in `context7` (up-to-date
+library/framework doc lookups) by default, added 2026-09-11 at the user's
+request. Deliberately **not** wiring in this repo's other configured MCP
+servers (`godot`, `retroarch`, `backlog`) into the *launched* agent by
+default: `godot`/`retroarch` serve phases of this project (presentation,
+original-game capture) that don't overlap with `game/simulation/`'s
+deliberately engine-independent work, and giving an unattended run a new
+MCP integration point is itself a new failure surface (see the line-wrap
+hang and marker-regex bug this same session ran into) — not worth taking
+on for tools with no clear task-relevant payoff. If a future task family
+genuinely needs one of those (e.g. presentation-layer work that would
+benefit from `godot`'s live debug output), point `--mcp-config` at a
+task-specific config file rather than broadening the default one.
 
 ## 6. Monitor with minimal oversight
 
@@ -721,6 +764,24 @@ that plainly rather than merging over it. Always report back:
 DONE/BAILED/TTL-expired/killed-for-thrashing, what actually landed (from
 `git log`/`git diff`, not from the run's own self-report), and the PR/merge
 outcome.
+
+**Explicitly stop that task's Monitor once you're done with it here —
+don't rely solely on the polling loop's own `break` to exit it.** A real
+incident (2026-09-11): two Monitor loops (each a plain `while true; do
+head -n1 "$f"; case ...; sleep 15; done` polling a status file for
+`DONE`/`BAILED`/etc, per step 6) kept running for hours after their tasks
+had already finished, been reviewed, and merged — one status file was
+observed to read `DONE` (correctly triggering review and merge) and then,
+later, `RUNNING` again with no agent process left alive to have written
+that, so the loop's `case` never got a second chance to match and `break`.
+The exact mechanism wasn't fully pinned down, but the fix does not depend
+on knowing it: once you've finished acting on a task in this step (merged,
+or escalated a bail/failure) you already have that task's Monitor id in
+hand from when you armed it in step 6 — call `TaskStop` on it right here,
+unconditionally, rather than assuming the loop already exited or will
+exit on its own. This costs nothing when the loop did already exit
+cleanly (`TaskStop` on an already-finished task is a harmless no-op) and
+prevents exactly this accumulation when it didn't.
 
 **Standing user authorization (granted 2026-09-10):** the user has told
 Claude directly that it has permission to merge the PR as part of this

@@ -712,6 +712,38 @@ head -n1 /path/to/logs/<TASK-ID>.status   # RUNNING | ASK | DONE | BAILED | PROC
   build) looks identical in the timestamp to genuine thrashing. Telling
   the two apart still means reading what the run is actually doing, the
   same as the non-pi flow below.
+- `RUNNING`, but the worktree already shows a real local commit and the
+  events log's last turn reads as a genuine, coherent completion summary
+  (test counts, what shipped, honest caveats) — the model finished the
+  actual work and settled (`agent_settled` fired) without ever emitting a
+  valid `MANUAL_RUN: DONE —`/`BAILED —` marker on its own. This is a
+  distinct, **recurring** failure mode (not a one-off — it hit roughly a
+  dozen separate runs across one long session), and it is not the same as
+  the frozen-timestamp or no-progress cases above: the bridge is alive and
+  correctly reports `RUNNING` because, from its own point of view, nothing
+  terminal has happened yet. Verify the work really is done first
+  (`git log`/`git status`/`git diff` in the worktree, per step 7's own
+  standard check) — never nudge a marker into existence for work that
+  isn't actually finished. Once confirmed, send ONE maximally explicit
+  control-file nudge, not a soft one — a soft phrasing that merely
+  *mentions* the marker (e.g. "please print MANUAL_RUN: DONE now") has
+  repeatedly failed to produce a valid marker on the first try, costing
+  two extra round-trips waiting on a slow local model each time it
+  happened. Use this exact shape (fill in the summary):
+  ```bash
+  printf '%s\n' '{"type":"answer","message":"Do not push and do not ask further questions. Your only remaining action is to print exactly one line, starting at the very beginning of the line with no other text before it on that line: MANUAL_RUN: DONE — <one-line summary>. Print that line now and nothing else."}' \
+      >> /path/to/logs/<TASK-ID>.control.jsonl
+  ```
+  `MARKER_RE`'s separator after the keyword is deliberately forgiving
+  (hyphen/en-dash/em-dash/colon, in any combination, or none at all) so a
+  model that complies with "start the line with `MANUAL_RUN: DONE`" but
+  drops the exact em-dash character shown in the prompt template still
+  counts — this alone resolves it without a nudge in some cases (fixed
+  2026-09-12 after `AD-003.09.02` needed two nudges specifically because
+  the first compliant-looking response was missing only the em-dash and
+  the then-current regex required it verbatim). If even the explicit
+  nudge above doesn't produce a marker after one try, that's worth
+  escalating rather than repeating a fourth time.
 
 **For every other resolved agent**, each check, whether from a `/loop`
 firing or a manual look, should be non-blocking:

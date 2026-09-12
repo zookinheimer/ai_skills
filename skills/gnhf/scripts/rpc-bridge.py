@@ -47,8 +47,23 @@ from datetime import datetime, timezone
 # inline, or otherwise restated) while still matching every marker in the
 # four smoke-test scenarios, none of which ever put content before the
 # marker on its line.
+#
+# The separator between the keyword and the detail is optional and
+# tolerates hyphen/en-dash/em-dash/colon in any combination (`[-–—:]*`),
+# not just a mandatory em-dash. Observed live on AD-003.09.02: a genuine
+# completion settled with `MANUAL_RUN: DONE` at the true start of a line,
+# followed directly by a blank line and prose, with no em-dash anywhere --
+# the model complied with "print a line starting `MANUAL_RUN: DONE`" but
+# dropped the specific separator character the prompt template also shows,
+# which the strict `\s*—\s*` requirement rejected as no marker at all,
+# needing two extra control-file nudges to recover. A small/weak model
+# omitting an unusual Unicode character it was only shown once, well after
+# the load-bearing keyword, is exactly the kind of prose variation the
+# marker's own purpose (a reliable terminal signal despite imperfect
+# prose) should already tolerate.
 MARKER_RE = re.compile(
-    r"^MANUAL_RUN:\s*(DONE|BAILED|ASK)\s*—\s*(.*?)(?=\n*^MANUAL_RUN:\s*(?:DONE|BAILED|ASK)\s*—|\Z)",
+    r"^MANUAL_RUN:\s*(DONE|BAILED|ASK)\b\s*(?:[-–—:]+\s*)?(.*?)"
+    r"(?=\n*^MANUAL_RUN:\s*(?:DONE|BAILED|ASK)\b|\Z)",
     re.DOTALL | re.MULTILINE,
 )
 

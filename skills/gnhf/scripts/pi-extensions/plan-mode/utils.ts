@@ -52,6 +52,17 @@ const DESTRUCTIVE_PATTERNS = [
 
 // Safe read-only commands allowed in plan mode
 const SAFE_PATTERNS = [
+	// `cd` alone has no destructive potential -- it only changes the shell's
+	// own working directory, never writes or executes anything else -- so
+	// allowlisting it as a start-pattern costs nothing: DESTRUCTIVE_PATTERNS
+	// scans the whole command string, not just what follows `cd`, so
+	// `cd X && rm Y` still fails on the `rm` match regardless of this entry.
+	// Missing this, found live (AD-003.09.05, 2026-09-12): every command a
+	// model in this repo's own worktree convention writes starts with
+	// `cd <worktree-path> && <otherwise-safe command>` (matching how every
+	// gnhf task prompt is framed), and none of those matched any safe
+	// pattern at all, so they were rejected regardless of what followed.
+	/^\s*cd\b/,
 	/^\s*cat\b/,
 	/^\s*head\b/,
 	/^\s*tail\b/,

@@ -6,17 +6,29 @@
 // Destructive commands blocked in plan mode
 const DESTRUCTIVE_PATTERNS = [
 	/\brm\b/i,
-	/\brmdir\b/i,
+	// `rmdir`/`mkdir`/`touch`/`chmod`/`chown`/`truncate` each exclude a
+	// directly-following `(` -- a real shell command is never invoked as
+	// `word(args)` with no space, so that shape is uniquely a Python/
+	// pathlib method call (`os.rmdir()`, `d.mkdir(exist_ok=True)`,
+	// `Path.touch()`, `os.chmod()`, `os.chown()`, `f.truncate()`), never
+	// a shell command written that way. Found live (AD-003.09.11,
+	// 2026-09-12): a fixture-generation heredoc's `d.mkdir(exist_ok=True)`
+	// (a `pathlib.Path` call) was misread as the shell `mkdir` command.
+	// Only `mkdir` was observed live; the same exclusion is applied
+	// defensively to the other four, which have the identical
+	// Python/pathlib method-name collision and no corresponding loss of
+	// real coverage (`chmod 755 file`, `touch file`, etc. still match).
+	/\brmdir\b(?!\()/i,
 	/\bmv\b/i,
 	/\bcp\b/i,
-	/\bmkdir\b/i,
-	/\btouch\b/i,
-	/\bchmod\b/i,
-	/\bchown\b/i,
+	/\bmkdir\b(?!\()/i,
+	/\btouch\b(?!\()/i,
+	/\bchmod\b(?!\()/i,
+	/\bchown\b(?!\()/i,
 	/\bchgrp\b/i,
 	/\bln\b/i,
 	/\btee\b/i,
-	/\btruncate\b/i,
+	/\btruncate\b(?!\()/i,
 	// `dd` requires one of its own argument flags (`if=`/`of=`/`bs=`/etc.)
 	// rather than matching the bare two letters anywhere -- found live
 	// (AD-003.09.09, 2026-09-12): a python heredoc computing overlap

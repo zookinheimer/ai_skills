@@ -19,8 +19,18 @@ const DESTRUCTIVE_PATTERNS = [
 	/\btruncate\b/i,
 	/\bdd\b/i,
 	/\bshred\b/i,
-	/(^|[^<])>(?!>)/,
-	/>>/,
+	// Redirect detection deliberately exempts stderr-to-null/fd-duplication
+	// idioms (`2>/dev/null`, `2>&1`, `&>/dev/null`, `>>/dev/null`) -- these
+	// discard output or merge streams, they never write to a real file, so
+	// flagging them as destructive is a false positive, not caution. Found
+	// live (AD-003.09.04, 2026-09-12): almost every practical multi-command
+	// bash invocation includes a `2>/dev/null` to suppress noise, so the
+	// unconditional version blocked 119 of 137 tool calls (87%) on one real
+	// task before any file was ever touched -- not an edge case, the common
+	// path. A redirect to anything else (a real path) still matches and
+	// stays blocked; only these three specific safe forms are exempted.
+	/(^|[^<])>(?!>)(?!&)(?!\s*\/dev\/null\b)/,
+	/>>(?!\s*\/dev\/null\b)/,
 	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
 	/\byarn\s+(add|remove|install|publish)/i,
 	/\bpnpm\s+(add|remove|install|publish)/i,

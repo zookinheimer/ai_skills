@@ -17,7 +17,14 @@ const DESTRUCTIVE_PATTERNS = [
 	/\bln\b/i,
 	/\btee\b/i,
 	/\btruncate\b/i,
-	/\bdd\b/i,
+	// `dd` requires one of its own argument flags (`if=`/`of=`/`bs=`/etc.)
+	// rather than matching the bare two letters anywhere -- found live
+	// (AD-003.09.09, 2026-09-12): a python heredoc computing overlap
+	// windows used a plain local variable named `dd`, which the old
+	// unconditional `\bdd\b` misread as an invocation of the disk-copy
+	// command. A real `dd` command is never usefully invoked without at
+	// least one of these arguments, so requiring one costs nothing.
+	/\bdd\s+(if|of|bs|count|conv|skip|seek)=/i,
 	/\bshred\b/i,
 	// Redirect detection deliberately exempts stderr-to-null/fd-duplication
 	// idioms (`2>/dev/null`, `2>&1`, `&>/dev/null`, `>>/dev/null`) -- these
@@ -39,8 +46,15 @@ const DESTRUCTIVE_PATTERNS = [
 	// a real destructive redirect targets a path, which is never a bare
 	// integer immediately closed off like that. A redirect to a real path
 	// (`> output.txt`, `> 5file.txt`, `>> log`) still matches and stays
-	// blocked.
-	/(^|[^<])>(?!>)(?!&)(?!=)(?!\s*\/dev\/null\b)(?!\s*-?\d+(?:\s|$|["')}\]{;]))/,
+	// blocked. The preceding-character exclusion also now excludes `-`,
+	// so `->` (Python type-hint/docstring/prose arrow notation, e.g.
+	// `def f() -> int:` or "removed -> replaced with") no longer matches
+	// either -- found live (AD-003.09.09, 2026-09-12) in plain English
+	// task-note prose passed through a python heredoc. No real shell
+	// redirect syntax is ever written with a literal `-` immediately
+	// before the `>` (that position is always a digit for an fd number,
+	// as in `2>`, or nothing), so this loses no real coverage.
+	/(^|[^<-])>(?!>)(?!&)(?!=)(?!\s*\/dev\/null\b)(?!\s*-?\d+(?:\s|$|["')}\]{;]))/,
 	/>>(?!\s*\/dev\/null\b)/,
 	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
 	/\byarn\s+(add|remove|install|publish)/i,
@@ -58,7 +72,18 @@ const DESTRUCTIVE_PATTERNS = [
 	/\bshutdown\b/i,
 	/\bsystemctl\s+(start|stop|restart|enable|disable)/i,
 	/\bservice\s+\S+\s+(start|stop|restart)/i,
-	/\b(vim?|nano|emacs|code|subl)\b/i,
+	// Anchored to command position (start of string, or right after a
+	// command separator) rather than matching anywhere in the string --
+	// found live (AD-003.09.09, 2026-09-12): "code" is an ordinary
+	// English word that appears constantly in comments, docstrings, and
+	// review prose ("the code(lines starting...", "print(code)"), and
+	// the old unconditional `\bcode\b` misread every one of those as an
+	// attempt to launch the VS Code CLI. `vim`/`nano`/`emacs`/`subl` are
+	// far less likely to collide with ordinary prose, but are anchored
+	// the same way for consistency -- a real editor invocation is always
+	// the command (or one piped/chained command) being run, never a
+	// substring inside a larger word or quoted text.
+	/(^|[;&|]\s*)(vim?|nano|emacs|code|subl)\b/i,
 ];
 
 // Safe read-only commands allowed in plan mode

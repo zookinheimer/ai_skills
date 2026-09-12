@@ -116,7 +116,28 @@ state4, detail4 = mod.Bridge.scan_markers(real_text)
 assert state4 == "DONE", f"expected state DONE, got {state4!r}"
 assert detail4 == "implemented X, Y, Z; tests pass.", f"unexpected detail: {detail4!r}"
 
-print("PASS(0): MARKER_RE/scan_markers unit check (last-marker-wins, multi-line detail preserved, quoted/restated marker rejected, genuine line-start marker still matches)")
+# Regression check for the AD-003.09.02 recovery incident: a genuine
+# completion where the model put "MANUAL_RUN: DONE" at the true start of
+# a line but dropped the em-dash separator entirely, going straight to a
+# blank line and prose. This must still be read as a real DONE -- the
+# separator is decoration, not the load-bearing part of the marker.
+no_separator_text = "MANUAL_RUN: DONE\n\nTwo honest caveats, neither a blocker:\n- foo\n- bar"
+state5, detail5 = mod.Bridge.scan_markers(no_separator_text)
+assert state5 == "DONE", f"expected state DONE, got {state5!r}"
+assert detail5 == "Two honest caveats, neither a blocker:\n- foo\n- bar", f"unexpected detail: {detail5!r}"
+
+# A few other separator variants a model might reasonably produce instead
+# of the exact em-dash the prompt template shows -- all must still match.
+for variant, expected_detail in (
+    ("MANUAL_RUN: DONE -- shipped it", "shipped it"),
+    ("MANUAL_RUN: DONE: shipped it", "shipped it"),
+    ("MANUAL_RUN: DONE - shipped it", "shipped it"),
+):
+    state_v, detail_v = mod.Bridge.scan_markers(variant)
+    assert state_v == "DONE", f"expected DONE for {variant!r}, got {state_v!r}"
+    assert detail_v == expected_detail, f"unexpected detail for {variant!r}: {detail_v!r}"
+
+print("PASS(0): MARKER_RE/scan_markers unit check (last-marker-wins, multi-line detail preserved, quoted/restated marker rejected, genuine line-start marker still matches, missing/varied separator tolerated)")
 EOF
 }
 

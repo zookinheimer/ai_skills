@@ -29,7 +29,18 @@ const DESTRUCTIVE_PATTERNS = [
 	// task before any file was ever touched -- not an edge case, the common
 	// path. A redirect to anything else (a real path) still matches and
 	// stays blocked; only these three specific safe forms are exempted.
-	/(^|[^<])>(?!>)(?!&)(?!\s*\/dev\/null\b)/,
+	// Also exempts `>=` (a numeric/string comparison, never a redirect
+	// operator in any shell) and a bare `>` immediately followed by a
+	// number then whitespace/EOL/closing quote-paren-brace-bracket-semicolon
+	// -- e.g. `NR>=436`, `j >= 0`, `length($0) > 100)`, `$1>5{print}`. Found
+	// live (AD-003.09.06, 2026-09-12): every awk one-liner or inline
+	// python snippet that compares a line number/length against a bound
+	// contains exactly this shape, and none of it writes to a file --
+	// a real destructive redirect targets a path, which is never a bare
+	// integer immediately closed off like that. A redirect to a real path
+	// (`> output.txt`, `> 5file.txt`, `>> log`) still matches and stays
+	// blocked.
+	/(^|[^<])>(?!>)(?!&)(?!=)(?!\s*\/dev\/null\b)(?!\s*-?\d+(?:\s|$|["')}\]{;]))/,
 	/>>(?!\s*\/dev\/null\b)/,
 	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
 	/\byarn\s+(add|remove|install|publish)/i,

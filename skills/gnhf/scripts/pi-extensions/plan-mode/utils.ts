@@ -26,7 +26,15 @@ const DESTRUCTIVE_PATTERNS = [
 	/\bchmod\b(?!\()/i,
 	/\bchown\b(?!\()/i,
 	/\bchgrp\b/i,
-	/\bln\b/i,
+	// Excludes a directly-preceding `-` -- a real `ln` invocation is always
+	// preceded by whitespace, a command separator, or start-of-string,
+	// never a bare hyphen with no space. That shape is uniquely a combined
+	// short-flag cluster of some OTHER command whose flags happen to spell
+	// "ln" as a substring. Found live (AD-003.10.01, 2026-09-12):
+	// `grep -ln pattern file` (grep's own `-l`/`-n` combined) was misread
+	// as invoking the link-creation command. A real `ln -s a b` still
+	// matches and stays blocked.
+	/(?<!-)\bln\b/i,
 	/\btee\b/i,
 	/\btruncate\b(?!\()/i,
 	// `dd` requires one of its own argument flags (`if=`/`of=`/`bs=`/etc.)
@@ -65,8 +73,13 @@ const DESTRUCTIVE_PATTERNS = [
 	// task-note prose passed through a python heredoc. No real shell
 	// redirect syntax is ever written with a literal `-` immediately
 	// before the `>` (that position is always a digit for an fd number,
-	// as in `2>`, or nothing), so this loses no real coverage.
-	/(^|[^<-])>(?!>)(?!&)(?!=)(?!\s*\/dev\/null\b)(?!\s*-?\d+(?:\s|$|["')}\]{;]))/,
+	// as in `2>`, or nothing), so this loses no real coverage. The
+	// digit-then-terminator exemption's terminator set now also includes
+	// `^` -- found live (AD-003.10.01, 2026-09-12): a code comment read
+	// "magnitude > 2^53" (caret-notation exponent in prose, not a shell
+	// construct), and the digit "2" followed immediately by `^` wasn't
+	// in the prior terminator set (whitespace/EOL/closing punctuation).
+	/(^|[^<-])>(?!>)(?!&)(?!=)(?!\s*\/dev\/null\b)(?!\s*-?\d+(?:\s|$|["')}\]{;^]))/,
 	/>>(?!\s*\/dev\/null\b)/,
 	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
 	/\byarn\s+(add|remove|install|publish)/i,

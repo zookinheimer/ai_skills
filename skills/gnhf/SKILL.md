@@ -547,7 +547,13 @@ human-readable view of the same session `--poll` is checking
 structurally — useful for judging genuine progress vs. thrashing, since
 `--poll`'s `RUNNING` alone doesn't distinguish the two.
 
-**If the resolved agent is `pi`**: unchanged —
+**If the resolved agent is `pi`**: `pi`'s own launch/monitor script logic
+(`run_launch_pi`, `build_smoke_cmd`'s pi branch) is a byte-identical port
+of what it always was — but the surrounding tooling is not: this rewrite
+drops the `rpc-bridge.py`-based live ASK channel, `.status` file, and
+heartbeat that `pi` had as the primary agent before the opencode-server-API
+rewrite. `pi` now uses the same plain checks below that were always the
+simpler fallback for a non-bridge-monitored agent:
 
 ```bash
 tail -n 40 /path/to/logs/<TASK-ID>.log
@@ -555,9 +561,9 @@ ps -p <PID> -o pid,etime,stat
 cd /path/to/worktrees/<TASK-ID> && git log --oneline -5 && git status --short
 ```
 
-Silent exit (process gone, no `MANUAL_RUN` marker in the log) is treated
-exactly as before: a `BAILED`-equivalent, report the blocker from the
-log's last ~50 lines, don't relaunch on a guess.
+Silent exit (process gone, no `MANUAL_RUN` marker in the log): treat as a
+`BAILED`-equivalent, report the blocker from the log's last ~50 lines,
+don't relaunch on a guess.
 
 **For both agents**: only intervene (nudge, or kill) on genuine thrashing
 signals — the same failing command repeating verbatim, no commits after a
@@ -618,6 +624,22 @@ unconditionally, rather than assuming the loop already exited or will
 exit on its own. This costs nothing when the loop did already exit
 cleanly (`TaskStop` on an already-finished task is a harmless no-op) and
 prevents exactly this accumulation when it didn't.
+
+**For `opencode` runs, also reap the detached `opencode serve` process
+once you're done acting on this task here.** Neither `--poll`'s
+`TTL_EXPIRED` path (which cleanly aborts the *session* via the API, not
+the server process) nor any other terminal state kills the process
+itself — nothing else in this skill does either, so it's left running
+indefinitely unless you do this:
+
+```bash
+kill "$(python3 -c "import json; print(json.load(open('/path/to/logs/<TASK-ID>.state.json'))['server_pid'])")" 2>/dev/null || true
+```
+
+Harmless to run even if the process already exited on its own
+(`SERVER_DIED`, or any other reason) — `kill` on an already-gone PID is a
+no-op here, not an error worth guarding more carefully than the `|| true`
+above.
 
 **Standing user authorization (granted 2026-09-10):** the user has told
 Claude directly that it has permission to merge the PR as part of this

@@ -27,8 +27,11 @@ All parameters are optional except the task itself.
   acceptance criteria, prior art in the repo, no judgment calls) — the
   skill screens for this and picks a different task, or asks you to
   respecify, if it isn't.
-- **`ttl`** — wall-clock budget in seconds before the run is killed via
-  `timeout`. Defaults to `86400` (24 hours) if omitted.
+- **`ttl`** — wall-clock budget in seconds before the run is stopped.
+  Defaults to `86400` (24 hours) if omitted. `pi` launches enforce this
+  via `timeout` killing the process; `opencode` launches enforce it via
+  `--poll` cleanly aborting the session once it's detected as expired
+  (see `SKILL.md` steps 5-6).
 - **`max-turns`** — turn/iteration bound, only meaningful when the agent is
   invoked once per turn with session continuation. Most single-invocation
   agent CLIs run their own internal tool-call loop, so `ttl` alone already

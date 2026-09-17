@@ -158,6 +158,10 @@ def print_tail(text, n):
 # unattended prompt, and a silently-hung run wastes the rest of its TTL
 # worse than a hard deny would. See spec "Default gnhf permission ruleset".
 _BASH_DENY_PATTERNS = [
+    # "rm -rf .." (no trailing slash) and "rm -rf ../*" (trailing slash plus
+    # glob) are each other's own case, not duplicates: opencode's glob
+    # matcher does not match "rm -rf .." against the "../*" pattern, so
+    # dropping either one would silently reopen that escape.
     "rm -rf /*", "rm -rf /", "rm -rf ~*", "rm -rf ..", "rm -rf ../*",
     "sudo *",
     "dd *", "mkfs *", "fdisk *", "parted *",
@@ -180,6 +184,12 @@ def build_gnhf_permission_ruleset():
         {"permission": "edit", "pattern": "*", "action": "allow"},
         {"permission": "webfetch", "pattern": "*", "action": "allow"},
         {"permission": "bash", "pattern": "*", "action": "allow"},
+        # opencode's permission evaluator defaults any category with no
+        # matching rule to "ask" -- an unattended run has no human to
+        # answer that, so external_directory (raised whenever a file op
+        # resolves outside the session directory) must be denied
+        # explicitly here to keep this ruleset's zero-ask invariant.
+        {"permission": "external_directory", "pattern": "*", "action": "deny"},
     ]
     ruleset += [
         {"permission": "bash", "pattern": pattern, "action": "deny"}

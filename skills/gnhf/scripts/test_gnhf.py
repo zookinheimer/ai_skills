@@ -128,6 +128,7 @@ def test_permission_ruleset_allows_edit_and_webfetch():
     assert by_permission["edit"]["action"] == "allow"
     assert by_permission["webfetch"]["action"] == "allow"
     assert by_permission["bash"]["action"] == "allow"
+    assert by_permission["external_directory"]["action"] == "deny"
 
 
 def test_start_opencode_serve_parses_bound_port(tmp_path, monkeypatch):

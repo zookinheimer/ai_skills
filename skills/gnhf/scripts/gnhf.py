@@ -83,7 +83,8 @@ EXIT_EARLY_EXIT = 4
 SMOKE_TEST_PROMPT = "Reply with exactly this one word and nothing else: PONG"
 
 RATE_LIMIT_PATTERNS = [
-    re.compile(r'"code"\s*:\s*"concurrency_limit"'),
+    re.compile(r'"code"\s*:\s*"concurrency_limit"'),  # unescaped (for error messages)
+    re.compile(r'\\"code\\"\s*:\s*\\"concurrency_limit\\"'),  # escaped (for JSON-serialized content)
     re.compile(r"rate_limit_error", re.IGNORECASE),
     re.compile(r"\b(?:status|http)\b[^\n]{0,10}\b429\b", re.IGNORECASE),
     re.compile(r"\b429\b[^\n]{0,20}\btoo many requests\b", re.IGNORECASE),
@@ -578,43 +579,79 @@ def run_smoke_test(agent, provider, model, path, timeout_s, max_retries, base_ba
 
 def run_smoke_test_opencode(provider, model, timeout_s, max_retries):
     import tempfile
-    with tempfile.TemporaryDirectory(prefix="gnhf-smoke-") as tmp:
-        log_path = Path(tmp) / "smoke.log"
-        try:
-            proc, port = start_opencode_serve(tmp, log_path)
-        except RuntimeError as exc:
-            print(f"FAIL: {exc}", file=sys.stderr)
-            return EXIT_FAIL
 
-        base_url = f"http://127.0.0.1:{port}"
-        try:
-            start = time.monotonic()
-            session_id = api_create_session(base_url, [])
-            api_prompt_async(base_url, session_id, SMOKE_TEST_PROMPT)
+    attempt = 0
+    while True:
+        attempt += 1
+        with tempfile.TemporaryDirectory(prefix="gnhf-smoke-") as tmp:
+            log_path = Path(tmp) / "smoke.log"
+            try:
+                proc, port = start_opencode_serve(tmp, log_path)
+            except RuntimeError as exc:
+                print(f"FAIL: {exc}", file=sys.stderr)
+                return EXIT_FAIL
 
-            deadline = time.monotonic() + timeout_s
-            while time.monotonic() < deadline:
-                messages = api_get_messages(base_url, session_id)
-                for message in reversed(messages):
-                    info = message.get("info", {})
-                    if info.get("role") == "assistant" and info.get("time", {}).get("completed"):
-                        text = "\n".join(
-                            p.get("text", "") for p in message.get("parts", []) if p.get("type") == "text"
-                        )
-                        elapsed = time.monotonic() - start
-                        if re.search(r"pong", text, re.IGNORECASE):
-                            print(f"PASS: opencode responded correctly in {elapsed:.0f}s")
-                            return EXIT_OK
-                        print(f"FAIL: opencode ran without error but did not return the expected reply", file=sys.stderr)
-                        print(f"--- output ---\n{text}", file=sys.stderr)
-                        return EXIT_FAIL
-                time.sleep(PROBE_POLL_INTERVAL)
-            print(f"FAIL: timed out after {timeout_s}s waiting for a response", file=sys.stderr)
-            return EXIT_FAIL
-        finally:
-            with contextlib.suppress(Exception):
-                proc.terminate()
-                proc.wait(timeout=5)
+            base_url = f"http://127.0.0.1:{port}"
+            outcome = None  # ("rate_limited", None) | ("done", (rc, msg, detail)) | None (timed out)
+            try:
+                start = time.monotonic()
+                session_id = api_create_session(base_url, [])
+                api_prompt_async(base_url, session_id, SMOKE_TEST_PROMPT)
+
+                deadline = time.monotonic() + timeout_s
+                while time.monotonic() < deadline:
+                    messages = api_get_messages(base_url, session_id)
+                    if is_rate_limited(json.dumps(messages)):
+                        outcome = ("rate_limited", None)
+                        break
+                    for message in reversed(messages):
+                        info = message.get("info", {})
+                        if info.get("role") == "assistant" and info.get("time", {}).get("completed"):
+                            text = "\n".join(
+                                p.get("text", "") for p in message.get("parts", []) if p.get("type") == "text"
+                            )
+                            elapsed = time.monotonic() - start
+                            if re.search(r"pong", text, re.IGNORECASE):
+                                outcome = ("done", (EXIT_OK, f"PASS: opencode responded correctly in {elapsed:.0f}s", None))
+                            else:
+                                outcome = ("done", (EXIT_FAIL, "FAIL: opencode ran without error but did not return the expected reply", text))
+                            break
+                    if outcome is not None:
+                        break
+                    time.sleep(PROBE_POLL_INTERVAL)
+            except requests.exceptions.RequestException as exc:
+                if is_rate_limited(str(exc)):
+                    outcome = ("rate_limited", None)
+                else:
+                    print(f"FAIL: opencode smoke test request failed: {exc}", file=sys.stderr)
+                    return EXIT_FAIL
+            finally:
+                with contextlib.suppress(Exception):
+                    proc.terminate()
+                    proc.wait(timeout=5)
+
+            if outcome is None:
+                print(f"FAIL: timed out after {timeout_s}s waiting for a response", file=sys.stderr)
+                return EXIT_FAIL
+
+            kind, payload = outcome
+            if kind == "rate_limited":
+                if attempt > max_retries:
+                    print(f"RATE_LIMITED: opencode still rate-limited after {attempt} attempts", file=sys.stderr)
+                    return EXIT_RATE_LIMITED
+                delay = backoff_delay(attempt, BASE_BACKOFF_DEFAULT, MAX_BACKOFF_DEFAULT)
+                print(f"RATE_LIMITED: attempt {attempt}, retrying in {delay:.0f}s", file=sys.stderr)
+                time.sleep(delay)
+                continue
+
+            rc, msg, detail = payload
+            if rc == EXIT_OK:
+                print(msg)
+            else:
+                print(msg, file=sys.stderr)
+                if detail:
+                    print(f"--- output ---\n{detail}", file=sys.stderr)
+            return rc
 
 
 def parse_args(argv):

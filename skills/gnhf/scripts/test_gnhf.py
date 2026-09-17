@@ -498,5 +498,23 @@ def test_smoke_test_opencode_reports_fail_on_wrong_reply(tmp_path, monkeypatch):
     assert "FAIL:" in output
 
 
+def test_smoke_test_opencode_gives_up_after_max_retries_when_rate_limited(tmp_path, monkeypatch):
+    from gnhf import run_smoke_test_opencode, EXIT_RATE_LIMITED
+
+    monkeypatch.setattr("gnhf.start_opencode_serve", lambda cwd, log: (_FakeProc(pid=1), 4100))
+    monkeypatch.setattr("gnhf.api_create_session", lambda *a, **k: "ses_smoke")
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda *a, **k: None)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [
+        {"info": {"role": "system"}, "parts": [{"type": "text", "text": '{"code": "concurrency_limit"}'}]},
+    ])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    rc, output = _capture(lambda: run_smoke_test_opencode(
+        provider=None, model=None, timeout_s=5, max_retries=1,
+    ))
+    assert rc == EXIT_RATE_LIMITED
+    assert "RATE_LIMITED" in output
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

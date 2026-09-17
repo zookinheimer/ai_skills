@@ -470,7 +470,7 @@ through the same script instead of a separate one:
     -- pi --session-id <task-id>-run -p "@/path/to/prompt.md"
 ```
 
-Default `TTL_SECONDS` to 10800 (3h) unless the user gives a different
+Default `TTL_SECONDS` to 86400 (24h) unless the user gives a different
 budget.
 
 `gnhf.py -l` exits with one of:

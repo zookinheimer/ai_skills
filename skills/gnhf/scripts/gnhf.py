@@ -106,7 +106,7 @@ def load_config(env_file):
 
 config = load_config(ENV_FILE)
 
-TTL_DEFAULT = config("GNHF_TTL", default=10800, cast=int)
+TTL_DEFAULT = config("GNHF_TTL", default=86400, cast=int)
 PROBE_DEFAULT = config("GNHF_PROBE", default=25, cast=float)
 BASE_BACKOFF_DEFAULT = config("GNHF_BASE_BACKOFF", default=75, cast=float)
 MAX_BACKOFF_DEFAULT = config("GNHF_MAX_BACKOFF", default=900, cast=float)

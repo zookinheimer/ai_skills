@@ -821,7 +821,7 @@ def main(argv=None):
         prompt_path = Path(args.log).with_suffix(".prompt.md")
         if not prompt_path.exists():
             print(
-                f"FAIL: no prompt file found at {prompt_path} -- write the task "
+                f"USAGE: no prompt file found at {prompt_path} -- write the task "
                 f"prompt there before launching (see SKILL.md step 5)",
                 file=sys.stderr,
             )

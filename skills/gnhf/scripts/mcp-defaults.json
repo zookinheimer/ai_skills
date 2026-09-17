@@ -1,15 +1,19 @@
-{
-  "mcpServers": {
-    "context7": {
-      "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"]
-    },
-    "godot": {
-      "command": "./tools/run.py",
-      "args": ["godot-mcp"],
-      "env": {
-        "DISPLAY": ":99"
-      }
+[
+  {
+    "name": "context7",
+    "config": {
+      "type": "local",
+      "command": ["npx", "-y", "@upstash/context7-mcp"],
+      "enabled": true
+    }
+  },
+  {
+    "name": "godot",
+    "config": {
+      "type": "local",
+      "command": ["./tools/run.py", "godot-mcp"],
+      "environment": { "DISPLAY": ":99" },
+      "enabled": true
     }
   }
-}
+]

@@ -384,6 +384,7 @@ def test_state_file_round_trips(tmp_path):
         "launched_at": "2026-09-17T08:00:00+00:00",
         "ttl": 10800,
         "nudge_count": 0,
+        "nudged_at": None,
     }
 
 
@@ -568,6 +569,30 @@ def test_run_poll_nudges_once_when_idle_with_no_marker(tmp_path, monkeypatch):
 
     from gnhf import read_state_file
     assert read_state_file(state_path)["nudge_count"] == 1
+
+
+def test_run_poll_respects_nudge_cooldown(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file, read_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+        nudge_count=1, nudged_at=datetime.now(timezone.utc).isoformat(),
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {})  # still reads idle
+    nudged = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert output.strip() == "RUNNING"
+    assert nudged == []
+    assert read_state_file(state_path)["nudge_count"] == 1  # unchanged
 
 
 def test_run_poll_stops_nudging_after_max_attempts(tmp_path, monkeypatch):

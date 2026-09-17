@@ -564,8 +564,8 @@ appears, the TTL expires, or you've confirmed real thrashing.
 ## 7. Finish
 
 On `MANUAL_RUN: BAILED —`, a silent marker-less exit (`pi`; step 6), a
-`SERVER_DIED` poll result (`opencode`; step 6), TTL expiry, or a thrashing
-kill: don't push anything.
+`SERVER_DIED` or exhausted `IDLE_NO_MARKER` poll result (`opencode`; step
+6), TTL expiry, or a thrashing kill: don't push anything.
 
 On `MANUAL_RUN: DONE —`: the launched agent commits locally only (per its
 own FINISH PROTOCOL, step 4 above) and never pushes or opens a PR itself —

@@ -83,7 +83,10 @@ EXIT_EARLY_EXIT = 4
 SMOKE_TEST_PROMPT = "Reply with exactly this one word and nothing else: PONG"
 
 MAX_IDLE_NUDGES = 2
+NUDGE_COOLDOWN_SECONDS = 30
 
+# Safe to include literal "MANUAL_RUN: DONE/BAILED" text here: find_manual_run_marker
+# only scans completed ASSISTANT messages, never this (user-role) nudge prompt itself.
 IDLE_NUDGE_PROMPT = (
     "You appear to have stopped without printing a MANUAL_RUN marker. "
     "Assess your actual progress right now: if every Acceptance Criteria "
@@ -292,7 +295,7 @@ def api_get_session_status(base_url):
     return response.json()
 
 
-def write_state_file(path, *, base_url, session_id, server_pid, worktree, launched_at, ttl, nudge_count=0):
+def write_state_file(path, *, base_url, session_id, server_pid, worktree, launched_at, ttl, nudge_count=0, nudged_at=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -303,6 +306,7 @@ def write_state_file(path, *, base_url, session_id, server_pid, worktree, launch
         "launched_at": launched_at,
         "ttl": ttl,
         "nudge_count": nudge_count,
+        "nudged_at": nudged_at,
     }))
 
 
@@ -373,6 +377,12 @@ def run_poll(state_path):
         status_map = api_get_session_status(base_url)
         session_status = status_map.get(session_id, {}).get("type", "idle")
         if session_status == "idle":
+            nudged_at = state.get("nudged_at")
+            if nudged_at is not None:
+                elapsed_since_nudge = (now - datetime.fromisoformat(nudged_at)).total_seconds()
+                if elapsed_since_nudge < NUDGE_COOLDOWN_SECONDS:
+                    print("RUNNING")
+                    return EXIT_OK
             nudge_count = state.get("nudge_count", 0)
             if nudge_count >= MAX_IDLE_NUDGES:
                 print(
@@ -387,6 +397,7 @@ def run_poll(state_path):
                 server_pid=state["server_pid"], worktree=state["worktree"],
                 launched_at=state["launched_at"], ttl=state["ttl"],
                 nudge_count=nudge_count + 1,
+                nudged_at=now.isoformat(),
             )
             print(f"IDLE_NO_MARKER: nudged (attempt {nudge_count + 1})")
             return EXIT_OK

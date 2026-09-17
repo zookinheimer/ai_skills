@@ -11,6 +11,8 @@
 # exclude-newer = "2026-10-01T00:00:00Z"
 # ///
 
+import contextlib
+import io
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +20,13 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+
+def _capture(fn):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = fn()
+    return rc, buf.getvalue()
 
 GNHF = Path(__file__).parent / "gnhf.py"
 
@@ -290,6 +299,96 @@ def test_state_file_round_trips(tmp_path):
         "launched_at": "2026-09-17T08:00:00+00:00",
         "ttl": 10800,
     }
+
+
+def test_run_poll_reports_running_with_no_marker(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert output.strip() == "RUNNING"
+
+
+def test_run_poll_reports_done_marker(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: ASSISTANT_DONE_MESSAGES)
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert "MANUAL_RUN: DONE" in output
+    assert "shipped the fix" in output
+
+
+def test_run_poll_rejects_out_of_policy_permission(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [{"id": "perm_1"}])
+    rejected = []
+    monkeypatch.setattr("gnhf.api_reject_permission", lambda base, sid, rid: rejected.append(rid))
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+
+    _capture(lambda: run_poll(str(state_path)))
+    assert rejected == ["perm_1"]
+
+
+def test_run_poll_aborts_on_ttl_expiry(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path),
+        launched_at="2020-01-01T00:00:00+00:00",  # far in the past -- always expired
+        ttl=1,
+    )
+    aborted = []
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_abort_session", lambda base, sid: aborted.append(sid))
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert output.startswith("TTL_EXPIRED")
+    assert aborted == ["ses1"]
+
+
+def test_run_poll_reports_server_died(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=10800,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: False)
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 1
+    assert output.startswith("SERVER_DIED")
 
 
 if __name__ == "__main__":

@@ -289,6 +289,50 @@ def find_manual_run_marker(messages):
     return None
 
 
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return pid_error_means_dead(pid)
+    return True
+
+
+def pid_error_means_dead(pid):
+    # ProcessLookupError: definitely gone. PermissionError: exists but owned
+    # by someone else -- treat as alive, since gnhf only ever signals PIDs
+    # it started itself.
+    return False
+
+
+def run_poll(state_path):
+    state = read_state_file(state_path)
+    base_url, session_id = state["base_url"], state["session_id"]
+
+    if not process_alive(state["server_pid"]):
+        print(f"SERVER_DIED: opencode serve (pid {state['server_pid']}) is no longer running")
+        return EXIT_FAIL
+
+    launched_at = datetime.fromisoformat(state["launched_at"])
+    now = datetime.now(launched_at.tzinfo)
+    if (now - launched_at).total_seconds() >= state["ttl"]:
+        api_abort_session(base_url, session_id)
+        print(f"TTL_EXPIRED: aborted session {session_id} after {state['ttl']}s")
+        return EXIT_OK
+
+    for pending in api_list_permissions(base_url, session_id):
+        api_reject_permission(base_url, session_id, pending["id"])
+
+    messages = api_get_messages(base_url, session_id)
+    marker = find_manual_run_marker(messages)
+    if marker is not None:
+        kind, detail = marker
+        print(f"MANUAL_RUN: {kind} — {detail}")
+        return EXIT_OK
+
+    print("RUNNING")
+    return EXIT_OK
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")

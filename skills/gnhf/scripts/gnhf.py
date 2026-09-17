@@ -67,6 +67,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta
 from decouple import Config, RepositoryEmpty, RepositoryEnv
@@ -132,6 +133,7 @@ PROVIDER_DEFAULT = config("GNHF_PROVIDER", default=None)
 MODEL_DEFAULT = config("GNHF_MODEL", default=None)
 
 PROBE_POLL_INTERVAL = 0.05
+HTTP_PROBE_POLL_INTERVAL = 1.0
 
 
 def is_rate_limited(text):
@@ -156,7 +158,7 @@ def print_tail(text, n):
 # unattended prompt, and a silently-hung run wastes the rest of its TTL
 # worse than a hard deny would. See spec "Default gnhf permission ruleset".
 _BASH_DENY_PATTERNS = [
-    "rm -rf /*", "rm -rf /", "rm *",
+    "rm -rf /*", "rm -rf /",
     "sudo *",
     "dd *", "mkfs *", "fdisk *", "parted *",
     "diskutil eraseDisk*", "diskutil eraseVolume*",
@@ -191,6 +193,20 @@ SERVE_LISTENING_RE = re.compile(r"opencode server listening on http://[^:]+:(\d+
 SERVE_POLL_INTERVAL = 0.1
 
 
+def _terminate_opencode_process(proc):
+    """Terminate a detached opencode process, escalating to SIGKILL if it
+    doesn't exit promptly rather than silently giving up."""
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
 def start_opencode_serve(cwd, log_path):
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -216,9 +232,7 @@ def start_opencode_serve(cwd, log_path):
                 f"see {log_path}"
             )
         time.sleep(SERVE_POLL_INTERVAL)
-    with contextlib.suppress(Exception):
-        proc.terminate()
-        proc.wait(timeout=5)
+    _terminate_opencode_process(proc)
     raise RuntimeError(f"opencode serve did not print a listening line within {SERVE_READY_TIMEOUT}s; see {log_path}")
 
 
@@ -326,7 +340,8 @@ def find_manual_run_marker(messages):
         )
         match = MARKER_RE.search(text)
         if match:
-            return match.group(1), match.group(2).strip()
+            detail = " ".join(match.group(2).split())
+            return match.group(1), detail
         return None
     return None
 
@@ -375,8 +390,9 @@ def run_poll(state_path):
             api_reject_question(base_url, pending_question["id"])
 
         status_map = api_get_session_status(base_url)
-        session_status = status_map.get(session_id, {}).get("type", "idle")
-        if session_status == "idle":
+        status_entry = status_map.get(session_id)
+        is_idle = status_entry is None or status_entry.get("type") == "idle"
+        if is_idle:
             nudged_at = state.get("nudged_at")
             if nudged_at is not None:
                 elapsed_since_nudge = (now - datetime.fromisoformat(nudged_at)).total_seconds()
@@ -469,7 +485,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
         if not rate_limited and early_exit_reason is None:
             deadline = time.monotonic() + probe
             while time.monotonic() < deadline:
-                time.sleep(PROBE_POLL_INTERVAL)
+                time.sleep(HTTP_PROBE_POLL_INTERVAL)
                 if proc.poll() is not None:
                     early_exit_reason = f"opencode serve exited (code {proc.returncode}) during probe window"
                     break
@@ -483,9 +499,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
                     break
 
         if rate_limited:
-            with contextlib.suppress(Exception):
-                proc.terminate()
-                proc.wait(timeout=5)
+            _terminate_opencode_process(proc)
             if attempt >= max_429 or total_backoff >= total_backoff_cap:
                 print(f"RATE_LIMITED: gave up after {attempt} attempts, {total_backoff:.0f}s of backoff", file=sys.stderr)
                 return EXIT_RATE_LIMITED
@@ -496,9 +510,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
             continue
 
         if early_exit_reason:
-            with contextlib.suppress(Exception):
-                proc.terminate()
-                proc.wait(timeout=5)
+            _terminate_opencode_process(proc)
             print(f"EARLY_EXIT: {early_exit_reason}", file=sys.stderr)
             return EXIT_EARLY_EXIT
 
@@ -510,7 +522,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
         if herdr_pane:
             maybe_open_herdr_pane(cwd, task_label, base_url, session_id)
 
-        ttl_expires = (datetime.now() + timedelta(seconds=ttl)).isoformat()
+        ttl_expires = (datetime.now().astimezone() + timedelta(seconds=ttl)).isoformat()
         print(f"LAUNCHED: session={session_id} port={port} pid={proc.pid} state={state_path} ttl_expires={ttl_expires}")
         return EXIT_OK
 
@@ -661,7 +673,6 @@ def run_smoke_test_opencode(provider, model, timeout_s, max_retries):
             file=sys.stderr,
         )
         return EXIT_FAIL
-    import tempfile
 
     attempt = 0
     while True:
@@ -701,7 +712,7 @@ def run_smoke_test_opencode(provider, model, timeout_s, max_retries):
                             break
                     if outcome is not None:
                         break
-                    time.sleep(PROBE_POLL_INTERVAL)
+                    time.sleep(HTTP_PROBE_POLL_INTERVAL)
             except requests.exceptions.RequestException as exc:
                 if is_rate_limited(str(exc)):
                     outcome = ("rate_limited", None)
@@ -709,9 +720,7 @@ def run_smoke_test_opencode(provider, model, timeout_s, max_retries):
                     print(f"FAIL: opencode smoke test request failed: {exc}", file=sys.stderr)
                     return EXIT_FAIL
             finally:
-                with contextlib.suppress(Exception):
-                    proc.terminate()
-                    proc.wait(timeout=5)
+                _terminate_opencode_process(proc)
 
             if outcome is None:
                 print(f"FAIL: timed out after {timeout_s}s waiting for a response", file=sys.stderr)

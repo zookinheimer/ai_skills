@@ -249,6 +249,7 @@ ASSISTANT_DONE_MESSAGES = [
     },
 ]
 
+
 ASSISTANT_STILL_RUNNING_MESSAGES = [
     {
         "info": {"role": "user", "time": {"created": 1}},
@@ -270,6 +271,20 @@ def test_find_manual_run_marker_detects_done():
 def test_find_manual_run_marker_none_while_running():
     from gnhf import find_manual_run_marker
     assert find_manual_run_marker(ASSISTANT_STILL_RUNNING_MESSAGES) is None
+
+
+def test_find_manual_run_marker_collapses_multiline_detail():
+    from gnhf import find_manual_run_marker
+    messages = [
+        {
+            "info": {"role": "assistant", "time": {"created": 1, "completed": 2}},
+            "parts": [{"type": "text", "text": "MANUAL_RUN: DONE — shipped the fix.\nAlso updated\n  the tests."}],
+        },
+    ]
+    kind, detail = find_manual_run_marker(messages)
+    assert kind == "DONE"
+    assert "\n" not in detail
+    assert detail == "shipped the fix. Also updated the tests."
 
 
 def test_api_reject_permission_sends_reject(monkeypatch):
@@ -617,6 +632,9 @@ def test_run_poll_stops_nudging_after_max_attempts(tmp_path, monkeypatch):
     assert "IDLE_NO_MARKER: settled with no MANUAL_RUN marker after 2 nudge(s)" in output
     assert nudged == []
 
+    from gnhf import read_state_file
+    assert read_state_file(state_path)["nudge_count"] == MAX_IDLE_NUDGES
+
 
 def test_run_poll_does_not_nudge_while_busy(tmp_path, monkeypatch):
     from gnhf import run_poll, write_state_file
@@ -631,6 +649,50 @@ def test_run_poll_does_not_nudge_while_busy(tmp_path, monkeypatch):
     monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "busy"}})
+    nudged = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert output.strip() == "RUNNING"
+    assert nudged == []
+
+
+def test_run_poll_treats_explicit_idle_status_as_idle(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "idle"}})
+    nudged = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert "IDLE_NO_MARKER: nudged" in output
+    assert len(nudged) == 1
+
+
+def test_run_poll_treats_retry_status_as_not_idle(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "retry", "attempt": 1, "message": "retrying", "next": 5}})
     nudged = []
     monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
 

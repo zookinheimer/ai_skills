@@ -818,8 +818,15 @@ def main(argv=None):
                 max_429=args.max_429, total_backoff_cap=args.total_backoff_cap,
                 command=args.launch_cmd,
             )
-        prompt_path = Path(args.cwd) / ".gnhf-prompt.md"
-        prompt = prompt_path.read_text() if prompt_path.exists() else ""
+        prompt_path = Path(args.log).with_suffix(".prompt.md")
+        if not prompt_path.exists():
+            print(
+                f"FAIL: no prompt file found at {prompt_path} -- write the task "
+                f"prompt there before launching (see SKILL.md step 5)",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        prompt = prompt_path.read_text()
         herdr_pane = args.herdr_pane if args.herdr_pane is not None else os.environ.get("HERDR_ENV") == "1"
         return run_launch_opencode(
             cwd=args.cwd, log_path=args.log, ttl=args.ttl, probe=args.probe,

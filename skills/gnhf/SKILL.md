@@ -438,10 +438,15 @@ session with gnhf's own permission ruleset (allow edit/webfetch/bash,
 explicit deny list for destructive bash patterns — no `ask` entries, since
 nothing will ever answer one unattended), and sends the task prompt via
 the session's async prompt endpoint. Write the prompt to
-`<worktree>/.gnhf-prompt.md` first — `gnhf.py` reads it from there:
+`<log-path-without-extension>.prompt.md` first — next to the log, not
+inside the worktree, so it can never end up in the launched agent's own
+`git status`/diff. `gnhf.py` reads it from there and refuses to launch
+(`EXIT_USAGE`, a clear stderr message) if the file is missing, rather than
+silently launching with an empty prompt and burning the full TTL waiting
+for a marker that can never appear:
 
 ```bash
-cat > /path/to/worktrees/<TASK-ID>/.gnhf-prompt.md <<'PROMPT_EOF'
+cat > /path/to/logs/<TASK-ID>.prompt.md <<'PROMPT_EOF'
 <full prompt from step 4>
 PROMPT_EOF
 

@@ -77,6 +77,17 @@ def test_launch_opencode_rejects_trailing_command():
     assert result.returncode == 2
 
 
+def test_launch_opencode_fails_fast_without_prompt_file(tmp_path):
+    log_path = tmp_path / "task.log"
+    result = run_gnhf(
+        "-l", "--agent", "opencode",
+        "-C", str(tmp_path), "-o", str(log_path), "-T", "100",
+    )
+    assert result.returncode == 2
+    assert "no prompt file found" in result.stderr
+    assert str(log_path.with_suffix(".prompt.md")) in result.stderr
+
+
 def test_is_rate_limited_matches_known_patterns():
     from gnhf import is_rate_limited
     assert is_rate_limited('{"code": "concurrency_limit"}')

@@ -171,6 +171,34 @@ def build_gnhf_permission_ruleset():
     return ruleset
 
 
+SERVE_READY_TIMEOUT = 15
+SERVE_LISTENING_RE = re.compile(r"opencode server listening on http://[^:]+:(\d+)")
+SERVE_POLL_INTERVAL = 0.1
+
+
+def start_opencode_serve(cwd, log_path):
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logf = open(log_path, "a")
+    proc = subprocess.Popen(
+        ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
+        cwd=cwd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
+    )
+    deadline = time.monotonic() + SERVE_READY_TIMEOUT
+    while time.monotonic() < deadline:
+        text = log_path.read_text(errors="replace")
+        match = SERVE_LISTENING_RE.search(text)
+        if match:
+            return proc, int(match.group(1))
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"opencode serve exited (code {proc.returncode}) before listening; "
+                f"see {log_path}"
+            )
+        time.sleep(SERVE_POLL_INTERVAL)
+    raise RuntimeError(f"opencode serve did not print a listening line within {SERVE_READY_TIMEOUT}s; see {log_path}")
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")

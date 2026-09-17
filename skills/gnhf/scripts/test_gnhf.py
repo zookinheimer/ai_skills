@@ -103,5 +103,47 @@ def test_permission_ruleset_allows_edit_and_webfetch():
     assert by_permission["bash"]["action"] == "allow"
 
 
+def test_start_opencode_serve_parses_bound_port(tmp_path, monkeypatch):
+    from gnhf import start_opencode_serve
+
+    log_path = tmp_path / "serve.log"
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+        pid = 4242
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd[:2] == ["opencode", "serve"]
+        log_path.write_text(
+            "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\n"
+            "opencode server listening on http://127.0.0.1:54321\n"
+        )
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    proc, port = start_opencode_serve(str(tmp_path), log_path)
+    assert port == 54321
+    assert proc.pid == 4242
+
+
+def test_start_opencode_serve_times_out_if_no_listening_line(tmp_path, monkeypatch):
+    from gnhf import start_opencode_serve
+
+    log_path = tmp_path / "serve.log"
+    log_path.write_text("")
+
+    class FakeProc:
+        def poll(self):
+            return None
+        pid = 1
+
+    monkeypatch.setattr("subprocess.Popen", lambda cmd, **kwargs: FakeProc())
+    monkeypatch.setattr("gnhf.SERVE_READY_TIMEOUT", 0.2)
+    with pytest.raises(RuntimeError, match="listening"):
+        start_opencode_serve(str(tmp_path), log_path)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

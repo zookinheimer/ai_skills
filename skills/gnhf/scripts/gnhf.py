@@ -438,6 +438,185 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
         return EXIT_OK
 
 
+def _kill_process_group(proc):
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+        proc.wait(timeout=5)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+
+
+def run_launch_pi(cwd, log_path, ttl, probe, base_backoff, max_backoff, max_429, total_backoff_cap, command):
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    attempt = 0
+    total_backoff = 0.0
+
+    with open(log_path, "a") as logf:
+        while True:
+            attempt += 1
+            logf.write(f"\n--- gnhf launch attempt {attempt} at {datetime.now().isoformat()} ---\n")
+            logf.flush()
+            attempt_offset = logf.tell()
+
+            full_cmd = ["timeout", str(ttl), *command]
+            proc = subprocess.Popen(full_cmd, cwd=cwd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)
+
+            def attempt_output():
+                with open(log_path, errors="replace") as f:
+                    f.seek(attempt_offset)
+                    return f.read()
+
+            rate_limited = False
+            exited_early = False
+            deadline = time.monotonic() + probe
+            while time.monotonic() < deadline:
+                time.sleep(PROBE_POLL_INTERVAL)
+                if is_rate_limited(attempt_output()):
+                    rate_limited = True
+                    break
+                if proc.poll() is not None:
+                    exited_early = True
+                    break
+
+            if not rate_limited and not exited_early and proc.poll() is not None:
+                if is_rate_limited(attempt_output()):
+                    rate_limited = True
+                else:
+                    exited_early = True
+
+            if rate_limited:
+                _kill_process_group(proc)
+                if attempt >= max_429 or total_backoff >= total_backoff_cap:
+                    print(f"RATE_LIMITED: gave up after {attempt} attempts, {total_backoff:.0f}s of backoff", file=sys.stderr)
+                    return EXIT_RATE_LIMITED
+                delay = backoff_delay(attempt, base_backoff, max_backoff)
+                total_backoff += delay
+                print(f"RATE_LIMITED: attempt {attempt}, backing off {delay:.0f}s", file=sys.stderr)
+                time.sleep(delay)
+                continue
+
+            if exited_early:
+                print(f"EARLY_EXIT: process exited during the {probe}s probe window, not rate-limited -- a real dispatch failure", file=sys.stderr)
+                return EXIT_EARLY_EXIT
+
+            ttl_expires = (datetime.now() + timedelta(seconds=max(ttl - probe, 0))).isoformat()
+            print(f"LAUNCHED: pid={proc.pid} attempt={attempt} ttl_expires={ttl_expires}")
+            return EXIT_OK
+
+
+def build_smoke_cmd(agent, provider, model, path):
+    if agent == "pi":
+        if not shutil.which("pi"):
+            return None, "FAIL: pi is not on PATH"
+        cmd = ["pi"]
+        if provider:
+            cmd += ["--provider", provider]
+        if model:
+            cmd += ["--model", model]
+        cmd += ["-p", SMOKE_TEST_PROMPT, "--no-session"]
+        return cmd, None
+    return None, f"Unknown agent for build_smoke_cmd: {agent}"
+
+
+def run_with_timeout(cmd, timeout_s):
+    start = time.monotonic()
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout_s, text=True)
+        rc, output = proc.returncode, proc.stdout
+    except subprocess.TimeoutExpired as exc:
+        rc = 124
+        output = exc.output if isinstance(exc.output, str) else (exc.output or b"").decode(errors="replace")
+    return rc, time.monotonic() - start, output
+
+
+def run_smoke_test(agent, provider, model, path, timeout_s, max_retries, base_backoff, max_backoff):
+    cmd, err = build_smoke_cmd(agent, provider, model, path or os.getcwd())
+    if cmd is None:
+        print(err, file=sys.stderr)
+        return EXIT_FAIL
+
+    attempt = 0
+    while True:
+        attempt += 1
+        print(f"Running: {' '.join(cmd)} (timeout {timeout_s}s)", file=sys.stderr)
+        rc, elapsed, output = run_with_timeout(cmd, timeout_s)
+
+        if rc == 124:
+            print(f"FAIL: timed out after {timeout_s}s waiting for a response", file=sys.stderr)
+            print_tail(output, 40)
+            return EXIT_FAIL
+
+        if rc != 0:
+            if is_rate_limited(output):
+                if attempt > max_retries:
+                    print(f"RATE_LIMITED: {agent} still rate-limited after {attempt} attempts", file=sys.stderr)
+                    print_tail(output, 60)
+                    return EXIT_RATE_LIMITED
+                delay = backoff_delay(attempt, base_backoff, max_backoff)
+                print(f"RATE_LIMITED: attempt {attempt}, retrying in {delay:.0f}s", file=sys.stderr)
+                time.sleep(delay)
+                continue
+            print(f"FAIL: {agent} exited with status {rc} after {elapsed:.0f}s", file=sys.stderr)
+            print_tail(output, 60)
+            return EXIT_FAIL
+
+        if re.search(r"pong", output, re.IGNORECASE):
+            print(f"PASS: {agent} responded correctly in {elapsed:.0f}s")
+            return EXIT_OK
+
+        print(f"FAIL: {agent} ran without error but did not return the expected reply", file=sys.stderr)
+        print_tail(output, 60)
+        return EXIT_FAIL
+
+
+def run_smoke_test_opencode(provider, model, timeout_s, max_retries):
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="gnhf-smoke-") as tmp:
+        log_path = Path(tmp) / "smoke.log"
+        try:
+            proc, port = start_opencode_serve(tmp, log_path)
+        except RuntimeError as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return EXIT_FAIL
+
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            start = time.monotonic()
+            session_id = api_create_session(base_url, [])
+            api_prompt_async(base_url, session_id, SMOKE_TEST_PROMPT)
+
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                messages = api_get_messages(base_url, session_id)
+                for message in reversed(messages):
+                    info = message.get("info", {})
+                    if info.get("role") == "assistant" and info.get("time", {}).get("completed"):
+                        text = "\n".join(
+                            p.get("text", "") for p in message.get("parts", []) if p.get("type") == "text"
+                        )
+                        elapsed = time.monotonic() - start
+                        if re.search(r"pong", text, re.IGNORECASE):
+                            print(f"PASS: opencode responded correctly in {elapsed:.0f}s")
+                            return EXIT_OK
+                        print(f"FAIL: opencode ran without error but did not return the expected reply", file=sys.stderr)
+                        print(f"--- output ---\n{text}", file=sys.stderr)
+                        return EXIT_FAIL
+                time.sleep(PROBE_POLL_INTERVAL)
+            print(f"FAIL: timed out after {timeout_s}s waiting for a response", file=sys.stderr)
+            return EXIT_FAIL
+        finally:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+                proc.wait(timeout=5)
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")
@@ -498,8 +677,36 @@ def parse_args(argv):
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    print("gnhf.py scaffolding only -- modes not yet implemented", file=sys.stderr)
-    return EXIT_USAGE
+
+    if args.poll:
+        return run_poll(args.poll)
+
+    if args.launch:
+        if args.agent == "pi":
+            return run_launch_pi(
+                cwd=args.cwd, log_path=args.log, ttl=args.ttl, probe=args.probe,
+                base_backoff=args.base_backoff, max_backoff=args.max_backoff,
+                max_429=args.max_429, total_backoff_cap=args.total_backoff_cap,
+                command=args.launch_cmd,
+            )
+        prompt_path = Path(args.cwd) / ".gnhf-prompt.md"
+        prompt = prompt_path.read_text() if prompt_path.exists() else ""
+        herdr_pane = args.herdr_pane if args.herdr_pane is not None else os.environ.get("HERDR_ENV") == "1"
+        return run_launch_opencode(
+            cwd=args.cwd, log_path=args.log, ttl=args.ttl, probe=args.probe,
+            base_backoff=args.base_backoff, max_backoff=args.max_backoff,
+            max_429=args.max_429, total_backoff_cap=args.total_backoff_cap,
+            prompt=prompt, herdr_pane=herdr_pane,
+        )
+
+    if args.smoke_test == "opencode":
+        return run_smoke_test_opencode(args.provider, args.model, args.timeout, args.max_retries)
+
+    return run_smoke_test(
+        agent=args.smoke_test, provider=args.provider, model=args.model, path=args.path,
+        timeout_s=args.timeout, max_retries=args.max_retries,
+        base_backoff=BASE_BACKOFF_DEFAULT, max_backoff=MAX_BACKOFF_DEFAULT,
+    )
 
 
 if __name__ == "__main__":

@@ -452,5 +452,51 @@ class _FakeProc:
         pass
 
 
+def test_build_smoke_cmd_pi_missing_binary(monkeypatch):
+    from gnhf import build_smoke_cmd
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    cmd, err = build_smoke_cmd("pi", None, None, "/tmp")
+    assert cmd is None
+    assert "not on PATH" in err
+
+
+def test_smoke_test_opencode_reports_pass(tmp_path, monkeypatch):
+    from gnhf import run_smoke_test_opencode
+
+    monkeypatch.setattr("gnhf.start_opencode_serve", lambda cwd, log: (_FakeProc(pid=1), 4100))
+    monkeypatch.setattr("gnhf.api_create_session", lambda *a, **k: "ses_smoke")
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda *a, **k: None)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [
+        {"info": {"role": "assistant", "time": {"created": 1, "completed": 2}},
+         "parts": [{"type": "text", "text": "PONG"}]},
+    ])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    rc, output = _capture(lambda: run_smoke_test_opencode(
+        provider=None, model=None, timeout_s=5, max_retries=1,
+    ))
+    assert rc == 0
+    assert "PASS:" in output
+
+
+def test_smoke_test_opencode_reports_fail_on_wrong_reply(tmp_path, monkeypatch):
+    from gnhf import run_smoke_test_opencode
+
+    monkeypatch.setattr("gnhf.start_opencode_serve", lambda cwd, log: (_FakeProc(pid=1), 4100))
+    monkeypatch.setattr("gnhf.api_create_session", lambda *a, **k: "ses_smoke")
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda *a, **k: None)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [
+        {"info": {"role": "assistant", "time": {"created": 1, "completed": 2}},
+         "parts": [{"type": "text", "text": "something else entirely"}]},
+    ])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    rc, output = _capture(lambda: run_smoke_test_opencode(
+        provider=None, model=None, timeout_s=5, max_retries=1,
+    ))
+    assert rc == 1
+    assert "FAIL:" in output
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

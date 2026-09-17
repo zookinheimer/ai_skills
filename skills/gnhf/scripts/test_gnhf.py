@@ -145,5 +145,128 @@ def test_start_opencode_serve_times_out_if_no_listening_line(tmp_path, monkeypat
         start_opencode_serve(str(tmp_path), log_path)
 
 
+def test_api_create_session_posts_permission_and_returns_id(monkeypatch):
+    from gnhf import api_create_session
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"id": "ses_abc123", "directory": "/tmp/wt"}
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    ruleset = [{"permission": "edit", "pattern": "*", "action": "allow"}]
+    session_id = api_create_session("http://127.0.0.1:4100", ruleset)
+    assert session_id == "ses_abc123"
+    assert captured["url"] == "http://127.0.0.1:4100/session"
+    assert captured["json"] == {"permission": ruleset}
+
+
+def test_api_prompt_async_sends_text_part(monkeypatch):
+    from gnhf import api_prompt_async
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 204
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    api_prompt_async("http://127.0.0.1:4100", "ses_abc123", "do the task")
+    assert captured["url"] == "http://127.0.0.1:4100/session/ses_abc123/prompt_async"
+    assert captured["json"] == {"parts": [{"type": "text", "text": "do the task"}]}
+
+
+ASSISTANT_DONE_MESSAGES = [
+    {
+        "info": {"role": "user", "time": {"created": 1}},
+        "parts": [{"type": "text", "text": "do the task"}],
+    },
+    {
+        "info": {"role": "assistant", "time": {"created": 2, "completed": 3}},
+        "parts": [
+            {"type": "step-start"},
+            {"type": "text", "text": "Working on it...\nMANUAL_RUN: DONE — shipped the fix"},
+        ],
+    },
+]
+
+ASSISTANT_STILL_RUNNING_MESSAGES = [
+    {
+        "info": {"role": "user", "time": {"created": 1}},
+        "parts": [{"type": "text", "text": "do the task"}],
+    },
+    {
+        "info": {"role": "assistant", "time": {"created": 2}},
+        "parts": [{"type": "text", "text": "still working"}],
+    },
+]
+
+
+def test_find_manual_run_marker_detects_done():
+    from gnhf import find_manual_run_marker
+    result = find_manual_run_marker(ASSISTANT_DONE_MESSAGES)
+    assert result == ("DONE", "shipped the fix")
+
+
+def test_find_manual_run_marker_none_while_running():
+    from gnhf import find_manual_run_marker
+    assert find_manual_run_marker(ASSISTANT_STILL_RUNNING_MESSAGES) is None
+
+
+def test_api_reject_permission_sends_reject(monkeypatch):
+    from gnhf import api_reject_permission
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    api_reject_permission("http://127.0.0.1:4100", "ses_abc123", "perm_1")
+    assert captured["url"] == "http://127.0.0.1:4100/session/ses_abc123/permission/perm_1/reply"
+    assert captured["json"] == {"reply": "reject"}
+
+
+def test_api_abort_session_posts_abort(monkeypatch):
+    from gnhf import api_abort_session
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None):
+        captured["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.post", fake_post)
+    api_abort_session("http://127.0.0.1:4100", "ses_abc123")
+    assert captured["url"] == "http://127.0.0.1:4100/session/ses_abc123/abort"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

@@ -199,6 +199,79 @@ def start_opencode_serve(cwd, log_path):
     raise RuntimeError(f"opencode serve did not print a listening line within {SERVE_READY_TIMEOUT}s; see {log_path}")
 
 
+API_TIMEOUT = 30  # a single HTTP round-trip, not the agent's own turn -- prompt_async
+                   # returns in well under a second (confirmed live: ~0.1s)
+
+# Ported from rpc-bridge.py's MARKER_RE, minus the ASK alternative -- gnhf.py
+# via the server API has no live-ask channel to match against.
+MARKER_RE = re.compile(
+    r"^MANUAL_RUN:\s*(DONE|BAILED)\b\s*(?:[-–—:]+\s*)?(.*?)"
+    r"(?=\n*^MANUAL_RUN:\s*(?:DONE|BAILED)\b|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def api_create_session(base_url, permission, directory=None):
+    body = {"permission": permission}
+    if directory is not None:
+        body["directory"] = directory
+    response = requests.post(f"{base_url}/session", json=body, timeout=API_TIMEOUT)
+    response.raise_for_status()
+    return response.json()["id"]
+
+
+def api_prompt_async(base_url, session_id, text):
+    response = requests.post(
+        f"{base_url}/session/{session_id}/prompt_async",
+        json={"parts": [{"type": "text", "text": text}]},
+        timeout=API_TIMEOUT,
+    )
+    response.raise_for_status()
+
+
+def api_get_messages(base_url, session_id):
+    response = requests.get(f"{base_url}/session/{session_id}/message", timeout=API_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def api_list_permissions(base_url, session_id):
+    response = requests.get(f"{base_url}/session/{session_id}/permission", timeout=API_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def api_reject_permission(base_url, session_id, request_id):
+    response = requests.post(
+        f"{base_url}/session/{session_id}/permission/{request_id}/reply",
+        json={"reply": "reject"},
+        timeout=API_TIMEOUT,
+    )
+    response.raise_for_status()
+
+
+def api_abort_session(base_url, session_id):
+    response = requests.post(f"{base_url}/session/{session_id}/abort", timeout=API_TIMEOUT)
+    response.raise_for_status()
+
+
+def find_manual_run_marker(messages):
+    for message in reversed(messages):
+        info = message.get("info", {})
+        if info.get("role") != "assistant":
+            continue
+        if not info.get("time", {}).get("completed"):
+            continue
+        text = "\n".join(
+            part.get("text", "") for part in message.get("parts", []) if part.get("type") == "text"
+        )
+        match = MARKER_RE.search(text)
+        if match:
+            return match.group(1), match.group(2).strip()
+        return None
+    return None
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")

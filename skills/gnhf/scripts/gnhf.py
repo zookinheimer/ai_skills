@@ -333,6 +333,111 @@ def run_poll(state_path):
     return EXIT_OK
 
 
+def maybe_open_herdr_pane(worktree, task_label, url):
+    """If HERDR_ENV=1, opens a Herdr workspace pane running
+    `opencode attach <url>` so the run is watchable as a real interactive
+    TUI -- matches SKILL.md's existing Herdr convention for other agents.
+    A pane failure is a visibility-only degradation, never fatal: the
+    server + session automation is the load-bearing path either way."""
+    if os.environ.get("HERDR_ENV") != "1":
+        return
+    if not shutil.which("herdr"):
+        return
+    try:
+        ws = subprocess.run(
+            ["herdr", "workspace", "create", "--cwd", worktree, "--label", task_label, "--no-focus"],
+            capture_output=True, text=True, timeout=15, check=True,
+        )
+        pane_id = json.loads(ws.stdout)["result"]["root_pane"]["pane_id"]
+        subprocess.run(
+            ["herdr", "pane", "run", pane_id, f"opencode attach {url}"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception as exc:
+        print(f"NOTE: Herdr pane setup failed ({exc}); continuing without a visible TUI", file=sys.stderr)
+
+
+def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
+                         max_429, total_backoff_cap, prompt, herdr_pane):
+    log_path = Path(log_path)
+    state_path = log_path.with_suffix(".state.json")
+    task_label = log_path.stem
+
+    attempt = 0
+    total_backoff = 0.0
+
+    while True:
+        attempt += 1
+        try:
+            proc, port = start_opencode_serve(cwd, log_path)
+        except RuntimeError as exc:
+            print(f"EARLY_EXIT: {exc}")
+            return EXIT_EARLY_EXIT
+
+        base_url = f"http://127.0.0.1:{port}"
+        rate_limited = False
+        early_exit_reason = None
+        session_id = None
+
+        try:
+            ruleset = build_gnhf_permission_ruleset()
+            session_id = api_create_session(base_url, ruleset)
+            api_prompt_async(base_url, session_id, prompt)
+        except requests.exceptions.RequestException as exc:
+            if is_rate_limited(str(exc)):
+                rate_limited = True
+            else:
+                early_exit_reason = str(exc)
+
+        if not rate_limited and early_exit_reason is None:
+            deadline = time.monotonic() + probe
+            while time.monotonic() < deadline:
+                time.sleep(PROBE_POLL_INTERVAL)
+                if proc.poll() is not None:
+                    early_exit_reason = f"opencode serve exited (code {proc.returncode}) during probe window"
+                    break
+                try:
+                    messages = api_get_messages(base_url, session_id)
+                except requests.exceptions.RequestException:
+                    continue
+                text = json.dumps(messages)
+                if is_rate_limited(text):
+                    rate_limited = True
+                    break
+
+        if rate_limited:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+                proc.wait(timeout=5)
+            if attempt >= max_429 or total_backoff >= total_backoff_cap:
+                print(f"RATE_LIMITED: gave up after {attempt} attempts, {total_backoff:.0f}s of backoff")
+                return EXIT_RATE_LIMITED
+            delay = backoff_delay(attempt, base_backoff, max_backoff)
+            total_backoff += delay
+            print(f"RATE_LIMITED: attempt {attempt}, backing off {delay:.0f}s")
+            time.sleep(delay)
+            continue
+
+        if early_exit_reason:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+                proc.wait(timeout=5)
+            print(f"EARLY_EXIT: {early_exit_reason}")
+            return EXIT_EARLY_EXIT
+
+        launched_at = datetime.now().astimezone().isoformat()
+        write_state_file(
+            state_path, base_url=base_url, session_id=session_id, server_pid=proc.pid,
+            worktree=cwd, launched_at=launched_at, ttl=ttl,
+        )
+        if herdr_pane:
+            maybe_open_herdr_pane(cwd, task_label, base_url)
+
+        ttl_expires = (datetime.now() + timedelta(seconds=ttl)).isoformat()
+        print(f"LAUNCHED: session={session_id} port={port} pid={proc.pid} state={state_path} ttl_expires={ttl_expires}")
+        return EXIT_OK
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")

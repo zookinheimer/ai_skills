@@ -391,5 +391,66 @@ def test_run_poll_reports_server_died(tmp_path, monkeypatch):
     assert output.startswith("SERVER_DIED")
 
 
+def test_run_launch_opencode_happy_path(tmp_path, monkeypatch):
+    from gnhf import run_launch_opencode, read_state_file
+
+    monkeypatch.setattr("gnhf.start_opencode_serve", lambda cwd, log: (_FakeProc(pid=555), 4100))
+    monkeypatch.setattr("gnhf.api_create_session", lambda base_url, permission, directory=None: "ses_new")
+    sent = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base_url, sid, text: sent.append((sid, text)))
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])  # no rate-limit text during probe
+    monkeypatch.setattr("gnhf.maybe_open_herdr_pane", lambda *a, **k: None)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    log_path = tmp_path / "TASK-1.log"
+    rc, output = _capture(lambda: run_launch_opencode(
+        cwd=str(tmp_path), log_path=str(log_path), ttl=10800, probe=0.01,
+        base_backoff=1, max_backoff=2, max_429=2, total_backoff_cap=10,
+        prompt="do the task", herdr_pane=False,
+    ))
+    assert rc == 0
+    assert "LAUNCHED: session=ses_new" in output
+    assert sent == [("ses_new", "do the task")]
+    state = read_state_file(tmp_path / "TASK-1.state.json")
+    assert state["session_id"] == "ses_new"
+    assert state["base_url"] == "http://127.0.0.1:4100"
+
+
+def test_run_launch_opencode_early_exit_when_server_dies_in_probe(tmp_path, monkeypatch):
+    from gnhf import run_launch_opencode, EXIT_EARLY_EXIT
+
+    dead_proc = _FakeProc(pid=555, dead=True)
+    monkeypatch.setattr("gnhf.start_opencode_serve", lambda cwd, log: (dead_proc, 4100))
+    monkeypatch.setattr("gnhf.api_create_session", lambda *a, **k: (_ for _ in ()).throw(
+        __import__("requests").exceptions.ConnectionError("refused")))
+    monkeypatch.setattr("gnhf.maybe_open_herdr_pane", lambda *a, **k: None)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    log_path = tmp_path / "TASK-2.log"
+    rc, output = _capture(lambda: run_launch_opencode(
+        cwd=str(tmp_path), log_path=str(log_path), ttl=10800, probe=0.01,
+        base_backoff=1, max_backoff=2, max_429=2, total_backoff_cap=10,
+        prompt="do the task", herdr_pane=False,
+    ))
+    assert rc == EXIT_EARLY_EXIT
+    assert "EARLY_EXIT" in output
+
+
+class _FakeProc:
+    def __init__(self, pid, dead=False):
+        self.pid = pid
+        self._dead = dead
+        self.returncode = 1 if dead else None
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        pass
+
+    def wait(self, timeout=None):
+        pass
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

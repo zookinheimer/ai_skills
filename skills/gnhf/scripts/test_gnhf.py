@@ -1,3 +1,16 @@
+#!/usr/bin/env -S uv run --script
+
+# /// script
+# requires-python = ">=3.13,<3.14"
+# dependencies = [
+#     "pytest>=7.0",
+#     "python-decouple>=3.8",
+#     "requests>=2.32",
+# ]
+# [tool.uv]
+# exclude-newer = "2026-10-01T00:00:00Z"
+# ///
+
 import subprocess
 import sys
 from pathlib import Path
@@ -44,3 +57,7 @@ def test_launch_opencode_rejects_trailing_command():
         "--", "echo", "hi",
     )
     assert result.returncode == 2
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"] + sys.argv[1:])

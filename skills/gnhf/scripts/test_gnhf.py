@@ -254,8 +254,33 @@ def test_api_reject_permission_sends_reject(monkeypatch):
 
     monkeypatch.setattr("requests.post", fake_post)
     api_reject_permission("http://127.0.0.1:4100", "ses_abc123", "perm_1")
-    assert captured["url"] == "http://127.0.0.1:4100/session/ses_abc123/permission/perm_1/reply"
+    assert captured["url"] == "http://127.0.0.1:4100/permission/perm_1/reply"
     assert captured["json"] == {"reply": "reject"}
+
+
+def test_api_list_permissions_filters_by_session(monkeypatch):
+    from gnhf import api_list_permissions
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return [
+                {"id": "perm_1", "sessionID": "ses_abc123", "permission": "bash"},
+                {"id": "perm_2", "sessionID": "ses_other", "permission": "edit"},
+            ]
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, timeout=None):
+        captured["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+    result = api_list_permissions("http://127.0.0.1:4100", "ses_abc123")
+    assert captured["url"] == "http://127.0.0.1:4100/permission"
+    assert result == [{"id": "perm_1", "sessionID": "ses_abc123", "permission": "bash"}]
 
 
 def test_api_abort_session_posts_abort(monkeypatch):

@@ -237,14 +237,14 @@ def api_get_messages(base_url, session_id):
 
 
 def api_list_permissions(base_url, session_id):
-    response = requests.get(f"{base_url}/session/{session_id}/permission", timeout=API_TIMEOUT)
+    response = requests.get(f"{base_url}/permission", timeout=API_TIMEOUT)
     response.raise_for_status()
-    return response.json()
+    return [p for p in response.json() if p.get("sessionID") == session_id]
 
 
 def api_reject_permission(base_url, session_id, request_id):
     response = requests.post(
-        f"{base_url}/session/{session_id}/permission/{request_id}/reply",
+        f"{base_url}/permission/{request_id}/reply",
         json={"reply": "reject"},
         timeout=API_TIMEOUT,
     )

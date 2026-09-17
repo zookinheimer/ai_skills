@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 def _capture(fn):
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         rc = fn()
     return rc, buf.getvalue()
 

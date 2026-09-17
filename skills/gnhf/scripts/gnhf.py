@@ -371,7 +371,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
         try:
             proc, port = start_opencode_serve(cwd, log_path)
         except RuntimeError as exc:
-            print(f"EARLY_EXIT: {exc}")
+            print(f"EARLY_EXIT: {exc}", file=sys.stderr)
             return EXIT_EARLY_EXIT
 
         base_url = f"http://127.0.0.1:{port}"
@@ -410,11 +410,11 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
                 proc.terminate()
                 proc.wait(timeout=5)
             if attempt >= max_429 or total_backoff >= total_backoff_cap:
-                print(f"RATE_LIMITED: gave up after {attempt} attempts, {total_backoff:.0f}s of backoff")
+                print(f"RATE_LIMITED: gave up after {attempt} attempts, {total_backoff:.0f}s of backoff", file=sys.stderr)
                 return EXIT_RATE_LIMITED
             delay = backoff_delay(attempt, base_backoff, max_backoff)
             total_backoff += delay
-            print(f"RATE_LIMITED: attempt {attempt}, backing off {delay:.0f}s")
+            print(f"RATE_LIMITED: attempt {attempt}, backing off {delay:.0f}s", file=sys.stderr)
             time.sleep(delay)
             continue
 
@@ -422,7 +422,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
             with contextlib.suppress(Exception):
                 proc.terminate()
                 proc.wait(timeout=5)
-            print(f"EARLY_EXIT: {early_exit_reason}")
+            print(f"EARLY_EXIT: {early_exit_reason}", file=sys.stderr)
             return EXIT_EARLY_EXIT
 
         launched_at = datetime.now().astimezone().isoformat()

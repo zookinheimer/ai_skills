@@ -307,6 +307,21 @@ don't — respect whatever privacy boundary the repo documents (this is
 usually spelled out per-backend, e.g. a "local vs remote planner" split in
 existing driver prompt templates).
 
+**Check for this before launching — don't rely on the run's own
+after-the-fact caveat to reveal the gap.** A real incident (2026-09-17,
+AD-013.10 in `azure-dreams-remake`): the task's own deliverable didn't
+need it, so the run still succeeded, but its honest self-report revealed
+the worktree had no `extracted/` tree — a real, 848MB directory that had
+sat in the main checkout the whole time, gitignored, never checked for
+before launch. The very next task in the same family needed exactly that
+directory (1054 PNGs under it) and would have failed outright on the same
+gap. The check is cheap and worth doing every time, not case-by-case
+guessing: after creating the worktree, run `cat .gitignore` (or `git
+check-ignore -v <candidate-dir>` for anything the task's own
+description/AC mentions by name) and symlink into the worktree whatever
+plausibly matters — an unused symlink costs nothing, a missing one
+silently narrows what the launched agent can actually do or verify.
+
 ## 4. Build the prompt
 
 Prefer the repo's own prompt conventions if any exist (grep for something

@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+skills/gnhf/.env
+.pytest_cache/

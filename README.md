@@ -7,10 +7,13 @@ directory under `skills/`.
 
 This is [zookinheimer](https://github.com/zookinheimer)'s fork of
 [pythoninthegrass/ai_skills](https://github.com/pythoninthegrass/ai_skills).
-On top of upstream, the `gnhf-pi-rpc-bridge` branch adds a live ASK channel
-and plan-mode auto-execute for `gnhf`'s unattended `pi` runs — see
-[skills/gnhf/scripts/rpc-bridge.py](skills/gnhf/scripts/rpc-bridge.py) and
-[skills/gnhf/scripts/pi-extensions/plan-mode/](skills/gnhf/scripts/pi-extensions/plan-mode/).
+On top of upstream, `gnhf` drives its unattended runs through opencode's
+own server API by default — a real interactive TUI stays attached and
+watchable (in a Herdr pane, when available) while a session-scoped
+permission ruleset and polling loop handle everything unattended.
+`pi` remains supported as a secondary agent. See
+[skills/gnhf/scripts/gnhf.py](skills/gnhf/scripts/gnhf.py) and
+[skills/gnhf/SKILL.md](skills/gnhf/SKILL.md).
 
 ## Skills
 
@@ -25,14 +28,6 @@ path — it detects installed agents and symlinks the skill into each one:
 
 ```bash
 npx skills add zookinheimer/ai_skills
-```
-
-The `gnhf-pi-rpc-bridge` branch (pi live-ASK channel + plan-mode
-auto-execute) isn't merged to `main` yet. Until it is, install straight
-from that branch with the CLI's direct-path form instead:
-
-```bash
-npx skills add https://github.com/zookinheimer/ai_skills/tree/gnhf-pi-rpc-bridge/skills/gnhf
 ```
 
 Useful flags: `-g` installs user-level instead of project-level, `-a
@@ -74,7 +69,6 @@ both auto-load `~/.agents/skills/`, and opencode also auto-loads
 
 ```bash
 git clone https://github.com/zookinheimer/ai_skills.git ~/git/ai_skills
-cd ~/git/ai_skills && git checkout gnhf-pi-rpc-bridge   # until it's merged to main
 mkdir -p ~/.agents/skills ~/.claude/skills
 ln -s ~/git/ai_skills/skills/gnhf ~/.agents/skills/gnhf   # pi, opencode
 ln -s ~/git/ai_skills/skills/gnhf ~/.claude/skills/gnhf   # Claude Code
@@ -108,11 +102,9 @@ skills/
 └── gnhf/
     ├── SKILL.md
     └── scripts/
-        ├── smoke-test.sh
-        ├── rpc-bridge.py               # pi --mode rpc launcher + ASK live channel
-        ├── rpc-bridge-smoke-test.sh
-        └── pi-extensions/
-            └── plan-mode/              # vendored from pi-coding-agent's bundled example
+        ├── gnhf.py                     # main unattended agent driver
+        ├── test_gnhf.py                # test suite
+        └── mcp-defaults.json           # MCP server configuration
 ```
 
 To add a new skill, create a directory under `skills/` with a `SKILL.md`
@@ -124,10 +116,8 @@ scaffolds one), then install/symlink it the same way as above.
 A skill's `SKILL.md` is instructions the model reads and follows, and any
 bundled scripts are code the model can execute. Review both before
 installing a skill from anywhere, including this repo. `gnhf` bundles
-`scripts/smoke-test.sh`, `scripts/rpc-bridge.py`,
-`scripts/rpc-bridge-smoke-test.sh`, and the vendored
-`scripts/pi-extensions/plan-mode/` (unmodified copy of an example
-extension from the `pi-coding-agent` npm package).
+`scripts/gnhf.py`, `scripts/test_gnhf.py`, and configuration in
+`scripts/mcp-defaults.json`.
 
 ## Prior art
 

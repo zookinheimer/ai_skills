@@ -74,15 +74,17 @@ another open-weight model, whatever) without ever asking it.
 1. `which pi opencode claude codex copilot 2>/dev/null` — which agent CLIs
    are actually on `PATH` right now. If none are found, stop here and
    report that no supported agent CLI is installed; don't guess or try to
-   install one. Default to `pi` if more than one is found and nothing else
-   disambiguates (matches this user's usual setup).
+   install one. Default to `opencode` if more than one is found and
+   nothing else disambiguates (matches this user's usual setup — opencode
+   runs as a genuinely interactive TUI, attachable live via a Herdr pane,
+   see step 5).
 2. **First pass — the CLI's own unmodified default.** Smoke-test it with no
    `--provider`/`--model` overrides:
 
    ```bash
-   "${SKILL_DIR}/scripts/smoke-test.sh" pi
+   "${SKILL_DIR}/scripts/gnhf.py" -s pi
    # or:
-   "${SKILL_DIR}/scripts/smoke-test.sh" opencode
+   "${SKILL_DIR}/scripts/gnhf.py" -s opencode
    ```
 
    Whatever the CLI does with zero model flags *is* "currently configured"
@@ -428,325 +430,106 @@ Your diff should touch only what this task's Acceptance Criteria describe.
 
 ## 5. Launch, bounded
 
-The wall-clock bound (TTL) is the primary and simplest bound — wrap the
-launch in `timeout`.
+The wall-clock bound (TTL) is the primary and simplest bound.
 
-**If this session is itself running inside a Herdr-managed pane**
-(`test "${HERDR_ENV:-}" = 1`), launch the run in its own Herdr workspace
-(a genuinely separate window, not a split or a tab in the caller's
-window — the user's preference, confirmed 2026-09-10) instead of a bare
-detached process, so it shows up in Herdr's own agent list/panel like any
-other agent session:
-
-```bash
-ws=$(herdr workspace create --cwd /path/to/worktrees/<TASK-ID> \
-    --label "<TASK-ID>" --no-focus)
-pane_id=$(printf '%s\n' "$ws" | jq -r '.result.root_pane.pane_id')
-```
-
-Do not use `herdr agent start` for this (its `--timeout` is only a
-3-300s startup-readiness wait, not a run-length bound, and it won't take
-a `timeout`-wrapped command line).
-
-**If the resolved agent (step 1) is `pi`**, run it through `rpc-bridge.py`
-here too (same flags as the bare-background form below), so the ASK
-live-channel and `--plan` auto-execute both work inside Herdr as well —
-**crucially, do NOT redirect its stdout away** (no trailing `>
-.../logs/<TASK-ID>.log 2>&1`, unlike every other launch form on this
-page):
+**If the resolved agent is `opencode`** (the default): `gnhf.py -l --agent
+opencode` starts `opencode serve` detached in the worktree, creates a
+session with gnhf's own permission ruleset (allow edit/webfetch/bash,
+explicit deny list for destructive bash patterns — no `ask` entries, since
+nothing will ever answer one unattended), and sends the task prompt via
+the session's async prompt endpoint. Write the prompt to
+`<worktree>/.gnhf-prompt.md` first — `gnhf.py` reads it from there:
 
 ```bash
-herdr pane run "$pane_id" \
-  "timeout <TTL_SECONDS> '${SKILL_DIR}/scripts/rpc-bridge.py' \
-      --session-id <task-id>-run \
-      --prompt-file /path/to/prompt.md \
-      --control-file /path/to/logs/<TASK-ID>.control.jsonl \
-      --events-log /path/to/logs/<TASK-ID>.log \
-      --status-file /path/to/logs/<TASK-ID>.status \
-      --cwd /path/to/worktrees/<TASK-ID> \
-      --extension '${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts' \
-      --plan \
-      --mcp-config '${SKILL_DIR}/scripts/mcp-defaults.json'"
+cat > /path/to/worktrees/<TASK-ID>/.gnhf-prompt.md <<'PROMPT_EOF'
+<full prompt from step 4>
+PROMPT_EOF
+
+"${SKILL_DIR}/scripts/gnhf.py" -l --agent opencode \
+    -C /path/to/worktrees/<TASK-ID> \
+    -o /path/to/logs/<TASK-ID>.log \
+    -T <TTL_SECONDS>
 ```
 
-Leaving stdout unredirected does two things at once, both confirmed live
-(2026-09-10, three trials): it makes the run's progress genuinely visible
-in the pane in real time (`rpc-bridge.py` echoes a human-readable line for
-each state transition, tool call, and completed assistant message — see
-"What the pane shows" below), **and** it fixes Herdr's own agent
-detection. Earlier testing with output redirected away (the events/status
-files still worked, but the pane itself stayed blank) found detection
-unreliable — one fluke `"agent":"pi"` sighting, then a longer trial that
-never registered at all sampled repeatedly across its whole duration.
-With output left visible, three separate trials all registered reliably
-(`"agent":"pi"`, `agent_status` moving `unknown` → `idle`/`working`) —
-Herdr's detector reads visible pane text, not the process tree, so a
-silent process (redirected or not producing real stdout at all) is
-invisible to it regardless of what it's actually doing internally.
+If `HERDR_ENV=1`, this also opens a Herdr pane running `opencode attach
+<url>` against the new session — a genuinely interactive TUI you can watch
+or type into at any time. This is a visibility convenience, not the
+control path: `gnhf.py` itself talks to the session over the server's REST
+API the whole time, whether or not a pane exists (`--no-herdr-pane` skips
+it explicitly; a failed pane creation degrades to no-pane, never fails the
+launch).
 
-**What the pane shows**: `[bridge] launching: ...` at spawn, `[bridge]
-status -> <STATE>` on every real state transition (not the ~10s
-heartbeat's repeats of the same state), `[tool] bash: <command>` / `[tool]
-edit: <path>` / etc. for each tool call, and each completed assistant
-message's text. This is the same information the raw `--events-log` JSONL
-carries, reformatted for a human watching the window rather than a
-monitor scanning the file — use whichever fits the moment.
-
-**Every other resolved agent** keeps the existing plain form, output
-redirected as before:
+**If the resolved agent is `pi`**: unchanged from before, just invoked
+through the same script instead of a separate one:
 
 ```bash
-herdr pane run "$pane_id" \
-  "timeout <TTL_SECONDS> <agent> <agent-specific-flags> --session-id <task-id>-run -p '@/path/to/prompt.md' > /path/to/logs/<TASK-ID>.log 2>&1"
+"${SKILL_DIR}/scripts/gnhf.py" -l --agent pi \
+    -C /path/to/worktrees/<TASK-ID> \
+    -o /path/to/logs/<TASK-ID>.log \
+    -T <TTL_SECONDS> \
+    -- pi --session-id <task-id>-run -p "@/path/to/prompt.md"
 ```
 
-Record `pane_id` — it's the handle for step 6's monitoring and stands in
-for the PID below.
+Default `TTL_SECONDS` to 10800 (3h) unless the user gives a different
+budget.
 
-**If `HERDR_ENV` is unset** (not running inside Herdr, or Herdr isn't
-installed), fall back to the plain background form. **If the resolved
-agent (step 1) is `pi`**, launch through `rpc-bridge.py` instead of a bare
-`pi -p` invocation, so the ASK live-channel (step 6) and the plan-mode
-auto-execute dialog (`--plan`, vendored at
-`scripts/pi-extensions/plan-mode/index.ts`) both work. Every other
-resolved agent keeps the plain form unchanged:
+`gnhf.py -l` exits with one of:
 
-```bash
-# pi:
-cd /path/to/worktrees/<TASK-ID>
-nohup timeout <TTL_SECONDS> "${SKILL_DIR}/scripts/rpc-bridge.py" \
-    --session-id <task-id>-run \
-    --prompt-file /path/to/prompt.md \
-    --control-file /path/to/logs/<TASK-ID>.control.jsonl \
-    --events-log /path/to/logs/<TASK-ID>.log \
-    --status-file /path/to/logs/<TASK-ID>.status \
-    --cwd /path/to/worktrees/<TASK-ID> \
-    --extension "${SKILL_DIR}/scripts/pi-extensions/plan-mode/index.ts" \
-    --plan \
-    --mcp-config "${SKILL_DIR}/scripts/mcp-defaults.json" \
-    [--provider <provider> --model <model>] \
-    > /path/to/logs/<TASK-ID>.readable.log 2>&1 &
+| Exit | Meaning | What to do |
+| --- | --- | --- |
+| 0 | `LAUNCHED: ...` | move to step 6, monitor via the printed session/PID |
+| 3 | `RATE_LIMITED:` — 429s past the retry ceiling | see below — never call this BAILED |
+| 4 | `EARLY_EXIT:` — died inside the probe window, not a 429 | a real dispatch failure (bad flag, missing binary, unreachable server) — report it, don't retry it |
 
-# any other agent:
-cd /path/to/worktrees/<TASK-ID>
-nohup timeout <TTL_SECONDS> <agent> <agent-specific-flags> \
-    --session-id <task-id>-run \
-    -p "@/path/to/prompt.md" \
-    > /path/to/logs/<TASK-ID>.log 2>&1 &
-```
-
-**Standing user preference (set 2026-09-10): do not let a run get killed
-by wall-clock TTL alone while it is genuinely still making progress.** The
-user does not want `timeout` cutting off a task that is actively working,
-just because it happens to be a harder slice than usual. In practice this
-means: default `TTL_SECONDS` to a generous backstop (86400 = 24h) rather
-than a tight budget, unless the user gives a different one — the real
-governor is step 6's monitoring (the thrashing/stall checks already
-described there), not the wall clock. Treat the TTL as a last-resort safety
-net against a truly runaway or hung session, not as a normal-completion
-bound: a task that's still emitting genuine tool-call activity when the
-old 3h default would have fired is not a reason to let it die.
-
-If a run is approaching an old/shorter TTL that was already set and is
-still progressing, don't wait for the kill — extend it proactively. `timeout`
-cannot have its deadline changed once started, and killing just the outer
-`timeout` PID does not spare its children (confirmed twice now: it takes
-the whole process tree down with it, `rpc-bridge.py` and `pi` included, the
-same as killing `rpc-bridge.py`'s own PID directly). The safe fix is
-kill-and-resume, not kill-and-restart-from-scratch: terminate the current
-wrapper, then immediately relaunch `rpc-bridge.py` with the **same
-`--session-id`** and a longer `TTL_SECONDS` (a fresh `--control-file` path
-is fine; reuse the same `--events-log`/`--status-file` paths so the run's
-history stays one continuous log). `pi --mode rpc --session-id <id>` is
-persisted per-session-id, so relaunching with the same id resumes the
-identical conversation and plan state (confirmed: the resumed run's
-plan-mode todo widget came back exactly as it was pre-kill, "0/11" and all,
-with no "creating a new session" warning) — the interruption costs a few
-seconds of relaunch time, not the run's progress. Re-arm a fresh Monitor on
-the (unchanged) status file path afterward, since the old one exits the
-moment it sees the `KILLED` status from the forced termination.
-
-Record the PID (or `pane_id` for the Herdr path) — for pi this is
-`rpc-bridge.py`'s own PID, not `pi`'s; killing it also kills the `pi`
-child (confirmed: `timeout` on this machine kills the whole process group,
-and the bridge's own shutdown path closes `pi`'s stdin, which `pi --mode
-rpc` treats as a clean-exit request before any signal is needed).
-
-A pi run therefore leaves three logs, not one: `<TASK-ID>.log` (raw
-JSONL, `--events-log`, every RPC event verbatim), `<TASK-ID>.bridge.log`
-(the bridge's own diagnostics plus `pi`'s stderr), and
-`<TASK-ID>.readable.log` (the same human-readable echo the Herdr pane
-shows live above — `tail -f` this one for a quick "what's it doing"
-check without parsing JSONL).
+Exit 3 and exit 4 mean the task never got a turn. Neither is a `BAILED`
+verdict, and neither is a reason to consider the task attempted. Only a
+launch that survives the probe window (exit 0) and later produces a
+`MANUAL_RUN: DONE —` / `MANUAL_RUN: BAILED —` marker, a TTL expiry, or a
+thrashing kill counts as a real outcome.
 
 A turn/iteration bound (`max-turns`) only applies when the agent is
-literally invoked once per turn with session continuation (e.g. opencode's
-`--continue <session-id>` pattern, or repeated `pi -p --session-id`
-calls) — most agent CLIs (including `pi -p`) run their own internal
-multi-step tool-call loop inside a single invocation, so `timeout` alone
-already bounds that. Only build an external per-turn loop-and-check
-wrapper if the user explicitly wants turn-level granularity (e.g. to
-inspect/steer between turns) rather than a single long-lived process.
-
-**`AGENTS.md`/`CLAUDE.md` are already auto-loaded — don't duplicate them
-in the prompt.** Confirmed empirically (2026-09-11): `pi` discovers and
-injects the target repo's `AGENTS.md`/`CLAUDE.md` into every session's
-startup context by default (the CLI's own `--no-context-files` flag —
-"Disable AGENTS.md and CLAUDE.md discovery and loading" — names the
-behavior this is turning off). None of the launch forms above pass that
-flag, so a launched run already has the repo's own architecture/style
-guardrails without step 4's prompt needing to restate them. Don't add an
-explicit "go read AGENTS.md first" instruction to the prompt template —
-it would be redundant, and worse, would read as a hint that this doesn't
-already happen.
-
-**`--mcp-config` for `pi`: confirmed to work with `--mode rpc`, and to
-merge additively with `pi`'s own existing default MCP set** rather than
-replacing it (verified empirically: a run given only a context7-only
-config still had `serena` available too, from whatever `pi` already
-configures by default) — so passing one is low-risk. `${SKILL_DIR}
-/scripts/mcp-defaults.json` wires in `context7` (up-to-date
-library/framework doc lookups) and `godot` (project introspection, scene
-editing, and — with the environment prerequisites below — actually
-running the project) by default, added 2026-09-11 at the user's request.
-
-**`godot`'s "run and watch" tools need real environment prerequisites,
-confirmed and set up 2026-09-11 (persist across reboots except the
-Xvfb process itself, which does not):**
-- `godot_get_project_info`/`godot_get_godot_version`/`godot_list_projects`/
-  `godot_get_uid`/`godot_update_project_uids` and the scene-editing tools
-  (`godot_create_scene`/`godot_add_node`/`godot_save_scene`/
-  `godot_load_sprite`/`godot_export_mesh_library`) all run Godot with
-  `--headless` internally and need nothing extra.
-- `godot_run_project`/`godot_get_debug_output`/`godot_stop_project`/
-  `godot_launch_editor` spawn Godot with a real display flag (`-d`/`-e`,
-  never `--headless`) — confirmed by reading
-  `node_modules/@coding-solo/godot-mcp/build/index.js` directly, not
-  assumed. They need: (1) a running virtual display — this machine has
-  none by default (`DISPLAY`/`WAYLAND_DISPLAY` both empty, no
-  `/tmp/.X11-unix`), so a persistent `Xvfb :99 -screen 0 1280x720x24 &`
-  must be running (`mcp-defaults.json`'s `godot` entry sets `"env":
-  {"DISPLAY": ":99"}` to match — if you ever change the Xvfb display
-  number, update both together); this is a bare background process, not
-  managed by gnhf or any service, so it needs restarting by hand after a
-  reboot or if it dies — `pgrep -fa 'Xvfb :99'` to check; and (2) several
-  shared libraries this machine didn't have installed by default, found
-  one crash-message at a time by invoking the pinned Godot binary
-  directly under the Xvfb display (`DISPLAY=:99
-  .tools/game/godot/Godot_v4.7.1-stable_linux.x86_64 -d --path ./game`)
-  and reading its stderr rather than trusting the MCP tool's own generic
-  "no active process" error, which doesn't surface the real cause:
-  `libfontconfig1`, `libxcursor1`, `libwayland-cursor0`, `libxinerama1`,
-  `libxi6` (required — X11 display init fails without them, cascading
-  into a Wayland fallback that also fails with no compositor available),
-  plus `libasound2t64`/`libpulse0` (cosmetic only — without them the
-  engine still runs correctly, just logs an audio-driver-fallback
-  warning). Verified end to end after both installs: `run_project` →
-  `get_debug_output` → `stop_project` against `./game` returns real
-  engine output (version string, renderer, no errors) with a clean stop.
-- Deliberately **not** wiring in this repo's other configured MCP servers
-  (`retroarch`, `backlog`) into the *launched* agent by default:
-  `retroarch` serves original-game capture work that doesn't overlap with
-  the simulation/content work this skill has mostly been used for, and
-  `backlog`'s own MCP surface is for task/project management, not
-  something a single bounded task run needs mid-flight. If a future task
-  family genuinely needs one of those, point `--mcp-config` at a
-  task-specific config file rather than broadening the default one.
+literally invoked once per turn with session continuation — most agent
+CLIs, and opencode's session API used here, run their own internal
+multi-step tool-call loop, so the TTL alone already bounds those. Only
+build an external per-turn loop-and-check wrapper if the user explicitly
+wants turn-level granularity.
 
 ## 6. Monitor with minimal oversight
 
-For a single (`--single`) run with the user present in the conversation,
-`ScheduleWakeup` (not a blocking sleep) is enough to check back
-periodically (every 15-20 minutes is reasonable). For chaining (step 8),
-prefer invoking the `loop` skill right after launch instead of calling
-`ScheduleWakeup` standalone: `ScheduleWakeup`'s own contract is written
-for "`/loop` dynamic mode" specifically, and a bare call outside that
-context is not guaranteed to actually wake this session on its own later
-— it may just as easily depend on the user prompting again, which defeats
-the "unattended" point of chaining. `/loop` (no fixed interval, so the
-model self-paces) is the mechanism actually meant to survive across turns
-without a person driving it; hand it a prompt describing this run's
-monitor-then-chain job (log path, PID/pane_id, and: on completion, do the
-step-7 review/merge, then step 2's auto-pick, then relaunch and loop
-again) rather than trying to keep the loop alive by hand.
+The TTL clock starts at the `LAUNCHED:` line from step 5, not at the first
+launch attempt — any attempts killed for rate-limiting don't count against
+the budget.
 
-**If the resolved agent is `pi`** (launched through `rpc-bridge.py`, step
-5), check its status file instead of grepping the log for a marker:
+**If the resolved agent is `opencode`**: each `ScheduleWakeup` tick, run
+one non-blocking poll against the state file `gnhf.py -l` printed:
 
 ```bash
-head -n1 /path/to/logs/<TASK-ID>.status   # RUNNING | ASK | DONE | BAILED | PROCESS_EXITED | BRIDGE_ERROR | KILLED
+"${SKILL_DIR}/scripts/gnhf.py" --poll /path/to/logs/<TASK-ID>.state.json
 ```
 
-- `DONE` / `BAILED`: proceed to step 7 exactly as with the marker-based
-  flow below.
-- `ASK`: read the rest of the status file (question text, on lines after
-  the timestamp) or `tail` the events log for the model's own `MANUAL_RUN:
-  ASK —` line, research/decide an answer the same way step 2's "Research
-  and decide" does for a mechanism question, then append the answer to
-  the control file so the bridge delivers it live:
-  ```bash
-  printf '%s\n' '{"type":"answer","message":"<your answer>"}' \
-      >> /path/to/logs/<TASK-ID>.control.jsonl
-  ```
-  Then keep monitoring — the run continues from wherever it paused.
-- `PROCESS_EXITED` / `BRIDGE_ERROR`: treat like the "silent exit" case
-  below — read the tail of the events/bridge logs for what happened,
-  report it as the blocker, don't relaunch on a guess.
-- `KILLED`: the bridge received SIGTERM (TTL expiry, most likely) — same
-  handling as a `timeout`-killed run in the non-pi flow.
-- `RUNNING` with the status file's timestamp itself frozen (`rpc-bridge.py`
-  heartbeats it every ~10s while genuinely RUNNING, so no movement at all
-  for several minutes means the bridge process itself likely died or
-  hung) is a hard stop — check `ps -p <PID>` and the bridge log
-  immediately, this is a different and more serious signal than the next
-  bullet.
-- `RUNNING` with the timestamp still ticking but no real progress for a
-  long stretch (skim recent tool-call content in the events log, don't
-  just trust the timestamp) is the pi-run equivalent of the thrashing
-  signal below: worth a closer look before deciding whether to nudge (via
-  the control file, a raw passthrough command like
-  `{"type":"steer","message":"..."}`) or let it keep running. **The
-  heartbeat is a liveness signal, not a progress signal** — it ticks every
-  ~10s purely from wall-clock time as long as the bridge's own loop is
-  alive, so a single long-running tool call (a slow test suite, a big
-  build) looks identical in the timestamp to genuine thrashing. Telling
-  the two apart still means reading what the run is actually doing, the
-  same as the non-pi flow below.
-- `RUNNING`, but the worktree already shows a real local commit and the
-  events log's last turn reads as a genuine, coherent completion summary
-  (test counts, what shipped, honest caveats) — the model finished the
-  actual work and settled (`agent_settled` fired) without ever emitting a
-  valid `MANUAL_RUN: DONE —`/`BAILED —` marker on its own. This is a
-  distinct, **recurring** failure mode (not a one-off — it hit roughly a
-  dozen separate runs across one long session), and it is not the same as
-  the frozen-timestamp or no-progress cases above: the bridge is alive and
-  correctly reports `RUNNING` because, from its own point of view, nothing
-  terminal has happened yet. Verify the work really is done first
-  (`git log`/`git status`/`git diff` in the worktree, per step 7's own
-  standard check) — never nudge a marker into existence for work that
-  isn't actually finished. Once confirmed, send ONE maximally explicit
-  control-file nudge, not a soft one — a soft phrasing that merely
-  *mentions* the marker (e.g. "please print MANUAL_RUN: DONE now") has
-  repeatedly failed to produce a valid marker on the first try, costing
-  two extra round-trips waiting on a slow local model each time it
-  happened. Use this exact shape (fill in the summary):
-  ```bash
-  printf '%s\n' '{"type":"answer","message":"Do not push and do not ask further questions. Your only remaining action is to print exactly one line, starting at the very beginning of the line with no other text before it on that line: MANUAL_RUN: DONE — <one-line summary>. Print that line now and nothing else."}' \
-      >> /path/to/logs/<TASK-ID>.control.jsonl
-  ```
-  `MARKER_RE`'s separator after the keyword is deliberately forgiving
-  (hyphen/en-dash/em-dash/colon, in any combination, or none at all) so a
-  model that complies with "start the line with `MANUAL_RUN: DONE`" but
-  drops the exact em-dash character shown in the prompt template still
-  counts — this alone resolves it without a nudge in some cases (fixed
-  2026-09-12 after `AD-003.09.02` needed two nudges specifically because
-  the first compliant-looking response was missing only the em-dash and
-  the then-current regex required it verbatim). If even the explicit
-  nudge above doesn't produce a marker after one try, that's worth
-  escalating rather than repeating a fourth time.
+This prints exactly one line:
 
-**For every other resolved agent**, each check, whether from a `/loop`
-firing or a manual look, should be non-blocking:
+- `RUNNING` — no terminal marker yet; keep waiting. Any pending permission
+  request outside gnhf's ruleset was already auto-rejected as a side
+  effect of this same poll — that's the safety net, not a sign of trouble
+  unless it keeps recurring for the same command (a thrashing signal, see
+  below).
+- `MANUAL_RUN: DONE — ...` / `MANUAL_RUN: BAILED — ...` — proceed to step
+  7 exactly as before.
+- `TTL_EXPIRED: ...` — the session was just cleanly aborted; proceed to
+  step 7's "don't push anything" branch.
+- `SERVER_DIED: ...` — `opencode serve` itself is no longer running (not a
+  clean abort). Treat like a silent marker-less exit: read the log at
+  `/path/to/logs/<TASK-ID>.log` for what happened, report it as the
+  blocker, don't relaunch on a guess.
+
+If a Herdr pane is running the TUI, you can also glance at it directly
+(`herdr agent read <pane_id> --source recent-unwrapped --lines 120`) for a
+human-readable view of the same session `--poll` is checking
+structurally — useful for judging genuine progress vs. thrashing, since
+`--poll`'s `RUNNING` alone doesn't distinguish the two.
+
+**If the resolved agent is `pi`**: unchanged —
 
 ```bash
 tail -n 40 /path/to/logs/<TASK-ID>.log
@@ -754,53 +537,22 @@ ps -p <PID> -o pid,etime,stat
 cd /path/to/worktrees/<TASK-ID> && git log --oneline -5 && git status --short
 ```
 
-If launched via a Herdr pane (step 5), also check the agent's live
-lifecycle state alongside the log/git checks:
+Silent exit (process gone, no `MANUAL_RUN` marker in the log) is treated
+exactly as before: a `BAILED`-equivalent, report the blocker from the
+log's last ~50 lines, don't relaunch on a guess.
 
-```bash
-herdr agent get "$pane_id"
-herdr agent read "$pane_id" --source recent-unwrapped --lines 120
-```
-
-`agent_status: idle` or `done` after the process has exited corroborates
-the log's own finish marker. `blocked` means Herdr detected an
-approval/question prompt in the pane — a headless `-p` invocation should
-never hit one, so treat `blocked` as a possible stuck/thrashing signal
-worth a closer look via `agent read`, not a routine state.
-
-**Silent exit is its own case, distinct from thrashing** (non-pi agents
-only — any pi run, bare-background or through a Herdr pane, always goes
-through `rpc-bridge.py` now and gets this as an explicit `PROCESS_EXITED`
-status above instead). If
-`ps`/`herdr agent get` shows the process/pane is no longer running (not
-killed by
-`timeout` — `etime` well under the TTL) and the log has neither
-`MANUAL_RUN: DONE —` nor `MANUAL_RUN: BAILED —`, the model ended its turn
-without a marker — most likely it asked a question or hedged instead of
-following the STUCK POLICY. Treat this exactly like a `BAILED` in step 7
-(no push, no PR): read the last ~50 lines of the log for whatever the
-model actually said before it stopped, and report that as the blocker —
-don't relaunch on a guess at what it meant, and don't treat the absence of
-a marker as silent success.
-
-Only intervene (nudge the run, or kill it) on genuine thrashing signals:
-the same failing command repeating verbatim, no commits after a long
-stretch with the identical error recurring, or the log showing an obvious
-loop. A run that's slow but making incremental progress (new draft
-attempts, changing error messages, partial test passes) is not thrashing —
-let it continue.
-
-Otherwise let it run until a `MANUAL_RUN: DONE —` / `MANUAL_RUN: BAILED —`
-marker appears, the process exits (including via `timeout` killing it at
-the TTL), or you've confirmed real thrashing.
+**For both agents**: only intervene (nudge, or kill) on genuine thrashing
+signals — the same failing command repeating verbatim, no commits after a
+long stretch with the identical error recurring, or an obvious loop. A run
+that's slow but making incremental progress is not thrashing — let it
+continue. Otherwise let it run until a terminal `--poll` line / log marker
+appears, the TTL expires, or you've confirmed real thrashing.
 
 ## 7. Finish
 
-On `MANUAL_RUN: BAILED —`, a silent marker-less exit (non-pi agents; step
-6), a `PROCESS_EXITED`/`BRIDGE_ERROR` status (pi via `rpc-bridge.py`; step
-6), TTL expiry, or a thrashing kill: don't push anything. Report the
-blocker and the worktree + log paths for manual review (plus the
-status/control file paths for a pi run).
+On `MANUAL_RUN: BAILED —`, a silent marker-less exit (`pi`; step 6), a
+`SERVER_DIED` poll result (`opencode`; step 6), TTL expiry, or a thrashing
+kill: don't push anything.
 
 On `MANUAL_RUN: DONE —`: the launched agent commits locally only (per its
 own FINISH PROTOCOL, step 4 above) and never pushes or opens a PR itself —
@@ -935,30 +687,47 @@ big or unfamiliar the work feels.
 
 ## Bundled scripts
 
-`scripts/smoke-test.sh` — verifies `pi` or `opencode` can reach its
-currently configured model and produce a real response (see step 1).
-Review it before first use to verify behavior.
+`scripts/gnhf.py` — a self-contained `uv run --script` (PEP 723) tool with
+three modes:
 
-`scripts/rpc-bridge.py` — launches `pi --mode rpc` for an unattended run
-and bridges gnhf's file-based monitoring protocol to it, giving the run a
-live channel to receive an answer to a `MANUAL_RUN: ASK —` question
-(step 6) and auto-answering the plan-mode extension's "Execute the plan"
-dialog when launched with `--plan` (see step 5). Also echoes a
-human-readable line to its own real stdout for every state transition,
-tool call, and completed assistant message — this is what a Herdr pane
-shows live when its output isn't redirected away, and what lands in
-`<TASK-ID>.readable.log` for the bare-background form (step 5). stdlib-
-only Python, no dependencies. Review it before first use to verify
+- `-s`/`--smoke-test <pi|opencode>` — verifies the agent can reach its
+  currently configured model and produce a real response (see step 1),
+  retrying transient 429s on its own backoff before reporting `FAIL:` or
+  `RATE_LIMITED:`. For `opencode`, this drives the same server-API path
+  real launches use (`opencode serve` → create session → send prompt →
+  poll for the reply), not `opencode run`.
+- `-l`/`--launch --agent <pi|opencode>` — launches the real task run (see
+  step 5). For `pi`, unchanged subprocess+`timeout`+probe+backoff around
+  the given command. For `opencode`, starts `opencode serve`, creates a
+  session with gnhf's permission ruleset, sends the prompt, and writes a
+  state file for `--poll` to read — no subprocess/`timeout` wrapping,
+  since there's no single foreground process to bound; TTL enforcement
+  happens in `--poll` via a clean session abort instead.
+- `--poll <state-file>` — one non-blocking check of an `opencode` launch
+  (see step 6): scans for a `MANUAL_RUN` marker, auto-rejects any pending
+  permission request outside the ruleset, aborts the session if the TTL
+  has elapsed.
+
+Every tunable (TTL, probe window, backoff base/cap, retry ceilings)
+resolves through `python-decouple`: CLI flag > process env >
+`skills/gnhf/.env` > hardcoded default. See `.env.example` for the full
+list of `GNHF_*` names — copy it to `.env` in this same directory to
+override the defaults for this machine. Run `scripts/gnhf.py -h` for the
+full flag list, and review the script before first use to verify
 behavior.
 
-`scripts/rpc-bridge-smoke-test.sh` — exercises `rpc-bridge.py` end to end
-against a real `pi --mode rpc` subprocess: the ASK/answer loop, the
-plan-mode auto-execute loop, a premature-then-real-DONE marker sequence
-within one agent run, and the status-file heartbeat during a long-running
-tool call. Run it after any change to `rpc-bridge.py` or the vendored
-plan-mode extension, before trusting either on a real task.
+`scripts/test_gnhf.py` — the accompanying pytest suite, also a
+self-contained `uv run --script`. All HTTP calls are mocked; no live
+`opencode serve` process is required to run it. Run it directly
+(`./scripts/test_gnhf.py`) after changing `gnhf.py`.
 
-`scripts/pi-extensions/plan-mode/` — vendored copy of `pi-coding-agent`'s
-bundled plan-mode example extension (unmodified). Loaded via `pi
---extension .../index.ts --plan` (step 5) so a `pi` run proposes a
-numbered plan read-only before `rpc-bridge.py` auto-approves execution.
+**Superseded**: `rpc-bridge.py`, `rpc-bridge-smoke-test.sh`, and the
+vendored `pi-extensions/plan-mode/` extension (nine documented
+false-positive fixes to a regex-based command scanner) are gone.
+opencode's session-scoped permission ruleset (structured `{permission,
+pattern, action}` objects the server evaluates itself) replaces
+plan-mode's job with something that can't have the same class of bug —
+it's never matching against a raw shell string in the first place. The
+server's own multi-client session model (the TUI and `gnhf.py` are both
+just HTTP clients of the same session) replaces rpc-bridge's bespoke
+pi-only live-ASK channel.

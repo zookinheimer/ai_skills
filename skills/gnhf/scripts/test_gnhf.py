@@ -115,7 +115,7 @@ def test_permission_ruleset_denies_destructive_bash():
     from gnhf import build_gnhf_permission_ruleset
     ruleset = build_gnhf_permission_ruleset()
     deny_patterns = {r["pattern"] for r in ruleset if r["permission"] == "bash" and r["action"] == "deny"}
-    for expected in ("rm -rf /*", "sudo *", "dd *", "git push --force*",
+    for expected in ("rm -rf /*", "rm -rf ~*", "rm -rf ..", "rm -rf ../*", "sudo *", "dd *", "git push --force*",
                      "git reset --hard*", "git checkout *", "git switch *",
                      "shutdown *", "killall *"):
         assert expected in deny_patterns, f"missing deny pattern: {expected}"

@@ -158,7 +158,7 @@ def print_tail(text, n):
 # unattended prompt, and a silently-hung run wastes the rest of its TTL
 # worse than a hard deny would. See spec "Default gnhf permission ruleset".
 _BASH_DENY_PATTERNS = [
-    "rm -rf /*", "rm -rf /",
+    "rm -rf /*", "rm -rf /", "rm -rf ~*", "rm -rf ..", "rm -rf ../*",
     "sudo *",
     "dd *", "mkfs *", "fdisk *", "parted *",
     "diskutil eraseDisk*", "diskutil eraseVolume*",

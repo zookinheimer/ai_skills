@@ -136,6 +136,41 @@ def print_tail(text, n):
         print(line, file=sys.stderr)
 
 
+# Adapted from ~/git/timecard/opencode.jsonc's example policy. Every `ask`
+# in that reference becomes `deny` here: there is no human to answer an
+# unattended prompt, and a silently-hung run wastes the rest of its TTL
+# worse than a hard deny would. See spec "Default gnhf permission ruleset".
+_BASH_DENY_PATTERNS = [
+    "rm -rf /*", "rm -rf /", "rm *",
+    "sudo *",
+    "dd *", "mkfs *", "fdisk *", "parted *",
+    "diskutil eraseDisk*", "diskutil eraseVolume*",
+    "diskutil partitionDisk*", "diskutil apfs deleteContainer*", "diskutil *",
+    "newfs*", "mount *", "umount *",
+    "shutdown *", "reboot *", "halt *",
+    "nvram *", "bless *", "csrutil *", "systemsetup *",
+    "launchctl *", "networksetup *", "scutil *", "dscl *", "pmset *",
+    "tmutil delete*", "tmutil *",
+    "git push --force*", "git reset --hard*",
+    "git checkout *", "git switch *",
+    "killall *", "pkill *",
+    "curl * | *sh*", "wget * | *sh*",
+]
+
+
+def build_gnhf_permission_ruleset():
+    ruleset = [
+        {"permission": "edit", "pattern": "*", "action": "allow"},
+        {"permission": "webfetch", "pattern": "*", "action": "allow"},
+        {"permission": "bash", "pattern": "*", "action": "allow"},
+    ]
+    ruleset += [
+        {"permission": "bash", "pattern": pattern, "action": "deny"}
+        for pattern in _BASH_DENY_PATTERNS
+    ]
+    return ruleset
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")

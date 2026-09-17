@@ -77,5 +77,31 @@ def test_backoff_delay_grows_and_caps():
     assert _raw_backoff(10, base=75, cap=900) == 900  # capped
 
 
+def test_permission_ruleset_has_no_ask_actions():
+    from gnhf import build_gnhf_permission_ruleset
+    ruleset = build_gnhf_permission_ruleset()
+    assert all(rule["action"] in ("allow", "deny") for rule in ruleset)
+    assert not any(rule["action"] == "ask" for rule in ruleset)
+
+
+def test_permission_ruleset_denies_destructive_bash():
+    from gnhf import build_gnhf_permission_ruleset
+    ruleset = build_gnhf_permission_ruleset()
+    deny_patterns = {r["pattern"] for r in ruleset if r["permission"] == "bash" and r["action"] == "deny"}
+    for expected in ("rm -rf /*", "sudo *", "dd *", "git push --force*",
+                     "git reset --hard*", "git checkout *", "git switch *",
+                     "shutdown *", "killall *"):
+        assert expected in deny_patterns, f"missing deny pattern: {expected}"
+
+
+def test_permission_ruleset_allows_edit_and_webfetch():
+    from gnhf import build_gnhf_permission_ruleset
+    ruleset = build_gnhf_permission_ruleset()
+    by_permission = {r["permission"]: r for r in ruleset if r["pattern"] == "*"}
+    assert by_permission["edit"]["action"] == "allow"
+    assert by_permission["webfetch"]["action"] == "allow"
+    assert by_permission["bash"]["action"] == "allow"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

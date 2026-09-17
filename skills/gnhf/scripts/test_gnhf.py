@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).parent))
+
 GNHF = Path(__file__).parent / "gnhf.py"
 
 
@@ -57,6 +59,22 @@ def test_launch_opencode_rejects_trailing_command():
         "--", "echo", "hi",
     )
     assert result.returncode == 2
+
+
+def test_is_rate_limited_matches_known_patterns():
+    from gnhf import is_rate_limited
+    assert is_rate_limited('{"code": "concurrency_limit"}')
+    assert is_rate_limited("rate_limit_error: too many requests")
+    assert is_rate_limited("HTTP status 429")
+    assert is_rate_limited("429 too many requests")
+    assert not is_rate_limited("PONG")
+
+
+def test_backoff_delay_grows_and_caps():
+    from gnhf import _raw_backoff
+    assert _raw_backoff(1, base=75, cap=900) == 75
+    assert _raw_backoff(2, base=75, cap=900) == 150
+    assert _raw_backoff(10, base=75, cap=900) == 900  # capped
 
 
 if __name__ == "__main__":

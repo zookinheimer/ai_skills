@@ -119,6 +119,23 @@ MODEL_DEFAULT = config("GNHF_MODEL", default=None)
 PROBE_POLL_INTERVAL = 0.05
 
 
+def is_rate_limited(text):
+    return any(pattern.search(text) for pattern in RATE_LIMIT_PATTERNS)
+
+
+def _raw_backoff(attempt, base, cap):
+    return min(base * (2 ** (attempt - 1)), cap)
+
+
+def backoff_delay(attempt, base, cap):
+    return _raw_backoff(attempt, base, cap) * random.uniform(0.8, 1.2)
+
+
+def print_tail(text, n):
+    for line in text.splitlines()[-n:]:
+        print(line, file=sys.stderr)
+
+
 def parse_args(argv):
     if "--" in argv:
         idx = argv.index("--")

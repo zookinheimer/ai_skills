@@ -522,6 +522,19 @@ This prints exactly one line:
   clean abort). Treat like a silent marker-less exit: read the log at
   `/path/to/logs/<TASK-ID>.log` for what happened, report it as the
   blocker, don't relaunch on a guess.
+- `IDLE_NO_MARKER: nudged (attempt N)` — the session went idle without
+  printing a marker; gnhf sent one automatic nudge asking the model to
+  assess its own progress and print `MANUAL_RUN: DONE`/`BAILED` now. Keep
+  polling as normal — this is the mitigation working, not a sign to
+  intervene, unless it recurs across multiple separate idle spells.
+- `IDLE_NO_MARKER: settled with no MANUAL_RUN marker after N nudge(s);
+  needs manual review` — nudging didn't get a marker after `MAX_IDLE_NUDGES`
+  attempts (currently 2). Treat like a silent marker-less exit: check the
+  worktree's `git log`/`git status` yourself to see what actually
+  happened, report it as the blocker, don't relaunch on a guess.
+- `POLL_ERROR: ...` — a transient API error (network blip, momentarily
+  busy server) during the poll itself, not a verdict on the task. Keep
+  polling; if it recurs on every tick, treat it like `SERVER_DIED`.
 
 If a Herdr pane is running the TUI, you can also glance at it directly
 (`herdr agent read <pane_id> --source recent-unwrapped --lines 120`) for a

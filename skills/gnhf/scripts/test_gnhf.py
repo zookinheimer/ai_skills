@@ -383,6 +383,7 @@ def test_state_file_round_trips(tmp_path):
         "worktree": "/path/to/worktrees/TASK-1",
         "launched_at": "2026-09-17T08:00:00+00:00",
         "ttl": 10800,
+        "nudge_count": 0,
     }
 
 
@@ -398,6 +399,7 @@ def test_run_poll_reports_running_with_no_marker(tmp_path, monkeypatch):
     monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "busy"}})
 
     rc, output = _capture(lambda: run_poll(str(state_path)))
     assert rc == 0
@@ -437,6 +439,7 @@ def test_run_poll_rejects_out_of_policy_permission(tmp_path, monkeypatch):
     rejected = []
     monkeypatch.setattr("gnhf.api_reject_permission", lambda base, sid, rid: rejected.append(rid))
     monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "busy"}})
 
     _capture(lambda: run_poll(str(state_path)))
     assert rejected == ["perm_1"]
@@ -456,6 +459,7 @@ def test_run_poll_rejects_out_of_policy_question(tmp_path, monkeypatch):
     rejected = []
     monkeypatch.setattr("gnhf.api_reject_question", lambda base, qid: rejected.append(qid))
     monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "busy"}})
 
     _capture(lambda: run_poll(str(state_path)))
     assert rejected == ["q_1"]
@@ -516,6 +520,99 @@ def test_run_poll_reports_server_died(tmp_path, monkeypatch):
     rc, output = _capture(lambda: run_poll(str(state_path)))
     assert rc == 1
     assert output.startswith("SERVER_DIED")
+
+
+def test_api_get_session_status_returns_raw_map(monkeypatch):
+    from gnhf import api_get_session_status
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return {"ses1": {"type": "busy"}}
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, timeout=None):
+        captured["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+    result = api_get_session_status("http://127.0.0.1:4100")
+    assert captured["url"] == "http://127.0.0.1:4100/session/status"
+    assert result == {"ses1": {"type": "busy"}}
+
+
+def test_run_poll_nudges_once_when_idle_with_no_marker(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {})  # empty map = idle
+    nudged = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert "IDLE_NO_MARKER: nudged (attempt 1)" in output
+    assert len(nudged) == 1
+    assert "MANUAL_RUN" in nudged[0]
+
+    from gnhf import read_state_file
+    assert read_state_file(state_path)["nudge_count"] == 1
+
+
+def test_run_poll_stops_nudging_after_max_attempts(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file, MAX_IDLE_NUDGES
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+        nudge_count=MAX_IDLE_NUDGES,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {})
+    nudged = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 1
+    assert "IDLE_NO_MARKER: settled with no MANUAL_RUN marker after 2 nudge(s)" in output
+    assert nudged == []
+
+
+def test_run_poll_does_not_nudge_while_busy(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_get_session_status", lambda *a, **k: {"ses1": {"type": "busy"}})
+    nudged = []
+    monkeypatch.setattr("gnhf.api_prompt_async", lambda base, sid, text: nudged.append(text))
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == 0
+    assert output.strip() == "RUNNING"
+    assert nudged == []
 
 
 def test_run_launch_opencode_happy_path(tmp_path, monkeypatch):

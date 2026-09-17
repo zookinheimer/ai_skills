@@ -36,10 +36,10 @@ Args:
                              permission request outside the gnhf ruleset,
                              aborts the session if the TTL has elapsed.
                              Prints RUNNING / DONE / BAILED / TTL_EXPIRED /
-                             SERVER_DIED. Not used for --agent pi launches
-                             (those are tailed/ps-checked directly, per
-                             SKILL.md step 6 -- pi's flow is otherwise
-                             unchanged.)
+                             SERVER_DIED / IDLE_NO_MARKER / POLL_ERROR. Not
+                             used for --agent pi launches (those are
+                             tailed/ps-checked directly, per SKILL.md step 6
+                             -- pi's flow is otherwise unchanged.)
 
 Note:
     Exit codes are shared across smoke-test and launch modes:
@@ -81,6 +81,17 @@ EXIT_RATE_LIMITED = 3
 EXIT_EARLY_EXIT = 4
 
 SMOKE_TEST_PROMPT = "Reply with exactly this one word and nothing else: PONG"
+
+MAX_IDLE_NUDGES = 2
+
+IDLE_NUDGE_PROMPT = (
+    "You appear to have stopped without printing a MANUAL_RUN marker. "
+    "Assess your actual progress right now: if every Acceptance Criteria "
+    "item is genuinely satisfied and committed, print exactly one line "
+    "starting `MANUAL_RUN: DONE — <summary>`. If you are stuck or "
+    "blocked, print exactly one line starting `MANUAL_RUN: BAILED — "
+    "<reason>`. Print that line now and nothing else."
+)
 
 RATE_LIMIT_PATTERNS = [
     re.compile(r'"code"\s*:\s*"concurrency_limit"'),  # unescaped (for error messages)
@@ -275,7 +286,13 @@ def api_abort_session(base_url, session_id):
     response.raise_for_status()
 
 
-def write_state_file(path, *, base_url, session_id, server_pid, worktree, launched_at, ttl):
+def api_get_session_status(base_url):
+    response = requests.get(f"{base_url}/session/status", timeout=API_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def write_state_file(path, *, base_url, session_id, server_pid, worktree, launched_at, ttl, nudge_count=0):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
@@ -285,6 +302,7 @@ def write_state_file(path, *, base_url, session_id, server_pid, worktree, launch
         "worktree": worktree,
         "launched_at": launched_at,
         "ttl": ttl,
+        "nudge_count": nudge_count,
     }))
 
 
@@ -351,6 +369,27 @@ def run_poll(state_path):
             api_reject_permission(base_url, session_id, pending["id"])
         for pending_question in api_list_questions(base_url, session_id):
             api_reject_question(base_url, pending_question["id"])
+
+        status_map = api_get_session_status(base_url)
+        session_status = status_map.get(session_id, {}).get("type", "idle")
+        if session_status == "idle":
+            nudge_count = state.get("nudge_count", 0)
+            if nudge_count >= MAX_IDLE_NUDGES:
+                print(
+                    f"IDLE_NO_MARKER: settled with no MANUAL_RUN marker after "
+                    f"{nudge_count} nudge(s); needs manual review"
+                )
+                return EXIT_FAIL
+            api_prompt_async(base_url, session_id, IDLE_NUDGE_PROMPT)
+            write_state_file(
+                state_path,
+                base_url=state["base_url"], session_id=state["session_id"],
+                server_pid=state["server_pid"], worktree=state["worktree"],
+                launched_at=state["launched_at"], ttl=state["ttl"],
+                nudge_count=nudge_count + 1,
+            )
+            print(f"IDLE_NO_MARKER: nudged (attempt {nudge_count + 1})")
+            return EXIT_OK
     except requests.exceptions.RequestException as exc:
         print(f"POLL_ERROR: {exc}", file=sys.stderr)
         return EXIT_FAIL

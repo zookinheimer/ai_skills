@@ -268,5 +268,29 @@ def test_api_abort_session_posts_abort(monkeypatch):
     assert captured["url"] == "http://127.0.0.1:4100/session/ses_abc123/abort"
 
 
+def test_state_file_round_trips(tmp_path):
+    from gnhf import write_state_file, read_state_file
+
+    state_path = tmp_path / "TASK-1.state.json"
+    write_state_file(
+        state_path,
+        base_url="http://127.0.0.1:4100",
+        session_id="ses_abc123",
+        server_pid=4242,
+        worktree="/path/to/worktrees/TASK-1",
+        launched_at="2026-09-17T08:00:00+00:00",
+        ttl=10800,
+    )
+    state = read_state_file(state_path)
+    assert state == {
+        "base_url": "http://127.0.0.1:4100",
+        "session_id": "ses_abc123",
+        "server_pid": 4242,
+        "worktree": "/path/to/worktrees/TASK-1",
+        "launched_at": "2026-09-17T08:00:00+00:00",
+        "ttl": 10800,
+    }
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"] + sys.argv[1:])

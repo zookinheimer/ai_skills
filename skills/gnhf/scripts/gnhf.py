@@ -255,6 +255,23 @@ def api_abort_session(base_url, session_id):
     response.raise_for_status()
 
 
+def write_state_file(path, *, base_url, session_id, server_pid, worktree, launched_at, ttl):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "base_url": base_url,
+        "session_id": session_id,
+        "server_pid": server_pid,
+        "worktree": worktree,
+        "launched_at": launched_at,
+        "ttl": ttl,
+    }))
+
+
+def read_state_file(path):
+    return json.loads(Path(path).read_text())
+
+
 def find_manual_run_marker(messages):
     for message in reversed(messages):
         info = message.get("info", {})

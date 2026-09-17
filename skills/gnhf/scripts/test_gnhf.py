@@ -15,9 +15,11 @@ import contextlib
 import io
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+import requests
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -27,6 +29,11 @@ def _capture(fn):
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         rc = fn()
     return rc, buf.getvalue()
+
+
+def _recent_iso(hours_ago=1):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+
 
 GNHF = Path(__file__).parent / "gnhf.py"
 
@@ -125,10 +132,11 @@ def test_start_opencode_serve_parses_bound_port(tmp_path, monkeypatch):
 
     def fake_popen(cmd, **kwargs):
         assert cmd[:2] == ["opencode", "serve"]
-        log_path.write_text(
-            "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\n"
-            "opencode server listening on http://127.0.0.1:54321\n"
-        )
+        with open(log_path, "a") as f:
+            f.write(
+                "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\n"
+                "opencode server listening on http://127.0.0.1:54321\n"
+            )
         return FakeProc()
 
     monkeypatch.setattr("subprocess.Popen", fake_popen)
@@ -147,11 +155,38 @@ def test_start_opencode_serve_times_out_if_no_listening_line(tmp_path, monkeypat
         def poll(self):
             return None
         pid = 1
+        def terminate(self):
+            pass
+        def wait(self, timeout=None):
+            pass
 
     monkeypatch.setattr("subprocess.Popen", lambda cmd, **kwargs: FakeProc())
     monkeypatch.setattr("gnhf.SERVE_READY_TIMEOUT", 0.2)
     with pytest.raises(RuntimeError, match="listening"):
         start_opencode_serve(str(tmp_path), log_path)
+
+
+def test_start_opencode_serve_ignores_stale_listening_line_from_prior_attempt(tmp_path, monkeypatch):
+    from gnhf import start_opencode_serve
+
+    log_path = tmp_path / "serve.log"
+    # Simulate a PRIOR attempt's stale line already in the log -- this is
+    # exactly the scenario that broke retry-under-contention before this fix.
+    log_path.write_text("opencode server listening on http://127.0.0.1:11111\n")
+
+    class FakeProc:
+        def poll(self):
+            return None
+        pid = 555
+
+    def fake_popen(cmd, **kwargs):
+        with open(log_path, "a") as f:
+            f.write("opencode server listening on http://127.0.0.1:22222\n")
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    proc, port = start_opencode_serve(str(tmp_path), log_path)
+    assert port == 22222  # the NEW attempt's port, not the stale 11111
 
 
 def test_api_create_session_posts_permission_and_returns_id(monkeypatch):
@@ -283,6 +318,31 @@ def test_api_list_permissions_filters_by_session(monkeypatch):
     assert result == [{"id": "perm_1", "sessionID": "ses_abc123", "permission": "bash"}]
 
 
+def test_api_list_questions_filters_by_session(monkeypatch):
+    from gnhf import api_list_questions
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        def json(self):
+            return [
+                {"id": "q_1", "sessionID": "ses_abc123"},
+                {"id": "q_2", "sessionID": "ses_other"},
+            ]
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, timeout=None):
+        captured["url"] = url
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.get", fake_get)
+    result = api_list_questions("http://127.0.0.1:4100", "ses_abc123")
+    assert captured["url"] == "http://127.0.0.1:4100/question"
+    assert result == [{"id": "q_1", "sessionID": "ses_abc123"}]
+
+
 def test_api_abort_session_posts_abort(monkeypatch):
     from gnhf import api_abort_session
 
@@ -332,10 +392,11 @@ def test_run_poll_reports_running_with_no_marker(tmp_path, monkeypatch):
     state_path = tmp_path / "s.json"
     write_state_file(
         state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
-        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=86400,
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
     )
     monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
 
     rc, output = _capture(lambda: run_poll(str(state_path)))
@@ -349,10 +410,11 @@ def test_run_poll_reports_done_marker(tmp_path, monkeypatch):
     state_path = tmp_path / "s.json"
     write_state_file(
         state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
-        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=86400,
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
     )
     monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: ASSISTANT_DONE_MESSAGES)
     monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
 
     rc, output = _capture(lambda: run_poll(str(state_path)))
@@ -367,16 +429,56 @@ def test_run_poll_rejects_out_of_policy_permission(tmp_path, monkeypatch):
     state_path = tmp_path / "s.json"
     write_state_file(
         state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
-        server_pid=99999999, worktree=str(tmp_path), launched_at="2026-09-17T08:00:00+00:00", ttl=86400,
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
     )
     monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
     monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [{"id": "perm_1"}])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [])
     rejected = []
     monkeypatch.setattr("gnhf.api_reject_permission", lambda base, sid, rid: rejected.append(rid))
     monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
 
     _capture(lambda: run_poll(str(state_path)))
     assert rejected == ["perm_1"]
+
+
+def test_run_poll_rejects_out_of_policy_question(tmp_path, monkeypatch):
+    from gnhf import run_poll, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.api_get_messages", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_permissions", lambda *a, **k: [])
+    monkeypatch.setattr("gnhf.api_list_questions", lambda *a, **k: [{"id": "q_1"}])
+    rejected = []
+    monkeypatch.setattr("gnhf.api_reject_question", lambda base, qid: rejected.append(qid))
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+
+    _capture(lambda: run_poll(str(state_path)))
+    assert rejected == ["q_1"]
+
+
+def test_run_poll_reports_poll_error_on_request_exception(tmp_path, monkeypatch):
+    from gnhf import run_poll, EXIT_FAIL, write_state_file
+
+    state_path = tmp_path / "s.json"
+    write_state_file(
+        state_path, base_url="http://127.0.0.1:4100", session_id="ses1",
+        server_pid=99999999, worktree=str(tmp_path), launched_at=_recent_iso(), ttl=86400,
+    )
+    monkeypatch.setattr("gnhf.process_alive", lambda pid: True)
+
+    def raise_it(*a, **k):
+        raise requests.exceptions.ConnectionError("connection refused")
+
+    monkeypatch.setattr("gnhf.api_get_messages", raise_it)
+
+    rc, output = _capture(lambda: run_poll(str(state_path)))
+    assert rc == EXIT_FAIL
+    assert "POLL_ERROR" in output
 
 
 def test_run_poll_aborts_on_ttl_expiry(tmp_path, monkeypatch):
@@ -521,6 +623,16 @@ def test_smoke_test_opencode_reports_fail_on_wrong_reply(tmp_path, monkeypatch):
     ))
     assert rc == 1
     assert "FAIL:" in output
+
+
+def test_smoke_test_opencode_rejects_provider_and_model_flags(monkeypatch):
+    from gnhf import run_smoke_test_opencode, EXIT_FAIL
+
+    rc, output = _capture(lambda: run_smoke_test_opencode(
+        provider="aperture", model="qwen3.8-flash-next-iq4", timeout_s=5, max_retries=1,
+    ))
+    assert rc == EXIT_FAIL
+    assert "not yet supported" in output
 
 
 def test_smoke_test_opencode_gives_up_after_max_retries_when_rate_limited(tmp_path, monkeypatch):

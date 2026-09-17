@@ -172,7 +172,7 @@ def build_gnhf_permission_ruleset():
     return ruleset
 
 
-SERVE_READY_TIMEOUT = 15
+SERVE_READY_TIMEOUT = 45
 SERVE_LISTENING_RE = re.compile(r"opencode server listening on http://[^:]+:(\d+)")
 SERVE_POLL_INTERVAL = 0.1
 
@@ -181,13 +181,18 @@ def start_opencode_serve(cwd, log_path):
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logf = open(log_path, "a")
+    logf.write(f"\n--- opencode serve attempt at {datetime.now().isoformat()} ---\n")
+    logf.flush()
+    start_offset = logf.tell()
     proc = subprocess.Popen(
         ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
         cwd=cwd, stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
     )
     deadline = time.monotonic() + SERVE_READY_TIMEOUT
     while time.monotonic() < deadline:
-        text = log_path.read_text(errors="replace")
+        with open(log_path, errors="replace") as f:
+            f.seek(start_offset)
+            text = f.read()
         match = SERVE_LISTENING_RE.search(text)
         if match:
             return proc, int(match.group(1))
@@ -197,6 +202,9 @@ def start_opencode_serve(cwd, log_path):
                 f"see {log_path}"
             )
         time.sleep(SERVE_POLL_INTERVAL)
+    with contextlib.suppress(Exception):
+        proc.terminate()
+        proc.wait(timeout=5)
     raise RuntimeError(f"opencode serve did not print a listening line within {SERVE_READY_TIMEOUT}s; see {log_path}")
 
 
@@ -212,11 +220,8 @@ MARKER_RE = re.compile(
 )
 
 
-def api_create_session(base_url, permission, directory=None):
-    body = {"permission": permission}
-    if directory is not None:
-        body["directory"] = directory
-    response = requests.post(f"{base_url}/session", json=body, timeout=API_TIMEOUT)
+def api_create_session(base_url, permission):
+    response = requests.post(f"{base_url}/session", json={"permission": permission}, timeout=API_TIMEOUT)
     response.raise_for_status()
     return response.json()["id"]
 
@@ -248,6 +253,20 @@ def api_reject_permission(base_url, session_id, request_id):
         json={"reply": "reject"},
         timeout=API_TIMEOUT,
     )
+    response.raise_for_status()
+
+
+def api_list_questions(base_url, session_id):
+    response = requests.get(f"{base_url}/question", timeout=API_TIMEOUT)
+    response.raise_for_status()
+    return [q for q in response.json() if q.get("sessionID") == session_id]
+
+
+def api_reject_question(base_url, question_id):
+    # Confirmed live against /doc: question.reject takes no request body --
+    # only the requestID path param and optional directory/workspace query
+    # params, neither of which gnhf needs here.
+    response = requests.post(f"{base_url}/question/{question_id}/reject", timeout=API_TIMEOUT)
     response.raise_for_status()
 
 
@@ -313,33 +332,40 @@ def run_poll(state_path):
         print(f"SERVER_DIED: opencode serve (pid {state['server_pid']}) is no longer running")
         return EXIT_FAIL
 
-    launched_at = datetime.fromisoformat(state["launched_at"])
-    now = datetime.now(launched_at.tzinfo)
-    if (now - launched_at).total_seconds() >= state["ttl"]:
-        api_abort_session(base_url, session_id)
-        print(f"TTL_EXPIRED: aborted session {session_id} after {state['ttl']}s")
-        return EXIT_OK
+    try:
+        messages = api_get_messages(base_url, session_id)
+        marker = find_manual_run_marker(messages)
+        if marker is not None:
+            kind, detail = marker
+            print(f"MANUAL_RUN: {kind} — {detail}")
+            return EXIT_OK
 
-    for pending in api_list_permissions(base_url, session_id):
-        api_reject_permission(base_url, session_id, pending["id"])
+        launched_at = datetime.fromisoformat(state["launched_at"])
+        now = datetime.now(launched_at.tzinfo)
+        if (now - launched_at).total_seconds() >= state["ttl"]:
+            api_abort_session(base_url, session_id)
+            print(f"TTL_EXPIRED: aborted session {session_id} after {state['ttl']}s")
+            return EXIT_OK
 
-    messages = api_get_messages(base_url, session_id)
-    marker = find_manual_run_marker(messages)
-    if marker is not None:
-        kind, detail = marker
-        print(f"MANUAL_RUN: {kind} — {detail}")
-        return EXIT_OK
+        for pending in api_list_permissions(base_url, session_id):
+            api_reject_permission(base_url, session_id, pending["id"])
+        for pending_question in api_list_questions(base_url, session_id):
+            api_reject_question(base_url, pending_question["id"])
+    except requests.exceptions.RequestException as exc:
+        print(f"POLL_ERROR: {exc}", file=sys.stderr)
+        return EXIT_FAIL
 
     print("RUNNING")
     return EXIT_OK
 
 
-def maybe_open_herdr_pane(worktree, task_label, url):
+def maybe_open_herdr_pane(worktree, task_label, url, session_id):
     """If HERDR_ENV=1, opens a Herdr workspace pane running
-    `opencode attach <url>` so the run is watchable as a real interactive
-    TUI -- matches SKILL.md's existing Herdr convention for other agents.
-    A pane failure is a visibility-only degradation, never fatal: the
-    server + session automation is the load-bearing path either way."""
+    `opencode attach <url> --session <session_id>` so the run is watchable
+    as a real interactive TUI -- matches SKILL.md's existing Herdr
+    convention for other agents. A pane failure is a visibility-only
+    degradation, never fatal: the server + session automation is the
+    load-bearing path either way."""
     if os.environ.get("HERDR_ENV") != "1":
         return
     if not shutil.which("herdr"):
@@ -351,7 +377,7 @@ def maybe_open_herdr_pane(worktree, task_label, url):
         )
         pane_id = json.loads(ws.stdout)["result"]["root_pane"]["pane_id"]
         subprocess.run(
-            ["herdr", "pane", "run", pane_id, f"opencode attach {url}"],
+            ["herdr", "pane", "run", pane_id, f"opencode attach {url} --session {session_id}"],
             capture_output=True, text=True, timeout=15,
         )
     except Exception as exc:
@@ -432,7 +458,7 @@ def run_launch_opencode(cwd, log_path, ttl, probe, base_backoff, max_backoff,
             worktree=cwd, launched_at=launched_at, ttl=ttl,
         )
         if herdr_pane:
-            maybe_open_herdr_pane(cwd, task_label, base_url)
+            maybe_open_herdr_pane(cwd, task_label, base_url, session_id)
 
         ttl_expires = (datetime.now() + timedelta(seconds=ttl)).isoformat()
         print(f"LAUNCHED: session={session_id} port={port} pid={proc.pid} state={state_path} ttl_expires={ttl_expires}")
@@ -578,6 +604,13 @@ def run_smoke_test(agent, provider, model, path, timeout_s, max_retries, base_ba
 
 
 def run_smoke_test_opencode(provider, model, timeout_s, max_retries):
+    if provider or model:
+        print(
+            "FAIL: -P/--provider and -m/--model are not yet supported for -s opencode "
+            "(it smoke-tests whichever model opencode is currently configured with)",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
     import tempfile
 
     attempt = 0
